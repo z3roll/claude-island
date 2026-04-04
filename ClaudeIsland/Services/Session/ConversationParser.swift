@@ -72,8 +72,7 @@ actor ConversationParser {
     /// Parse a JSONL file to extract conversation info
     /// Uses caching based on file modification time
     func parse(sessionId: String, cwd: String) -> ConversationInfo {
-        let projectDir = cwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
-        let sessionFile = NSHomeDirectory() + "/.claude/projects/" + projectDir + "/" + sessionId + ".jsonl"
+        let sessionFile = resolveSessionFilePath(sessionId: sessionId, cwd: cwd)
 
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: sessionFile),
@@ -263,7 +262,7 @@ actor ConversationParser {
 
     /// Parse full conversation history for chat view (returns ALL messages - use sparingly)
     func parseFullConversation(sessionId: String, cwd: String) -> [ChatMessage] {
-        let sessionFile = Self.sessionFilePath(sessionId: sessionId, cwd: cwd)
+        let sessionFile = resolveSessionFilePath(sessionId: sessionId, cwd: cwd)
 
         guard FileManager.default.fileExists(atPath: sessionFile) else {
             return []
@@ -292,7 +291,7 @@ actor ConversationParser {
 
     /// Parse only NEW messages since last call (efficient incremental updates)
     func parseIncremental(sessionId: String, cwd: String) -> IncrementalParseResult {
-        let sessionFile = Self.sessionFilePath(sessionId: sessionId, cwd: cwd)
+        let sessionFile = resolveSessionFilePath(sessionId: sessionId, cwd: cwd)
 
         guard FileManager.default.fileExists(atPath: sessionFile) else {
             return IncrementalParseResult(
@@ -467,7 +466,60 @@ actor ConversationParser {
         return true
     }
 
-    /// Build session file path
+    /// Cache of resolved session file paths (sessionId -> actual path)
+    private var resolvedPaths: [String: String] = [:]
+
+    /// Build session file path, searching for the JSONL if the cwd-based path doesn't exist.
+    /// Claude Code stores JSONL files based on the session's original project directory,
+    /// but hook events may report a different cwd (e.g., a subdirectory).
+    private func resolveSessionFilePath(sessionId: String, cwd: String) -> String {
+        // Return cached path if available
+        if let cached = resolvedPaths[sessionId] {
+            if FileManager.default.fileExists(atPath: cached) {
+                return cached
+            }
+            resolvedPaths.removeValue(forKey: sessionId)
+        }
+
+        // Try the cwd-based path first
+        let primaryPath = Self.sessionFilePath(sessionId: sessionId, cwd: cwd)
+        if FileManager.default.fileExists(atPath: primaryPath) {
+            resolvedPaths[sessionId] = primaryPath
+            return primaryPath
+        }
+
+        // Search parent directories of cwd
+        var searchCwd = cwd
+        while searchCwd != "/" && !searchCwd.isEmpty {
+            let parentCwd = (searchCwd as NSString).deletingLastPathComponent
+            let candidatePath = Self.sessionFilePath(sessionId: sessionId, cwd: parentCwd)
+            if FileManager.default.fileExists(atPath: candidatePath) {
+                Self.logger.info("Resolved JSONL at parent cwd=\(parentCwd, privacy: .public) (hook cwd=\(cwd, privacy: .public))")
+                resolvedPaths[sessionId] = candidatePath
+                return candidatePath
+            }
+            searchCwd = parentCwd
+        }
+
+        // Fallback: search all project directories
+        let projectsDir = NSHomeDirectory() + "/.claude/projects"
+        let fileName = sessionId + ".jsonl"
+        if let dirs = try? FileManager.default.contentsOfDirectory(atPath: projectsDir) {
+            for dir in dirs {
+                let candidatePath = projectsDir + "/" + dir + "/" + fileName
+                if FileManager.default.fileExists(atPath: candidatePath) {
+                    Self.logger.info("Resolved JSONL via search in \(dir, privacy: .public) (hook cwd=\(cwd, privacy: .public))")
+                    resolvedPaths[sessionId] = candidatePath
+                    return candidatePath
+                }
+            }
+        }
+
+        // Give up, return the original path
+        return primaryPath
+    }
+
+    /// Build session file path from cwd (static, no search)
     private static func sessionFilePath(sessionId: String, cwd: String) -> String {
         let projectDir = cwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
         return NSHomeDirectory() + "/.claude/projects/" + projectDir + "/" + sessionId + ".jsonl"
