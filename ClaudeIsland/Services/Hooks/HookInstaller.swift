@@ -70,6 +70,37 @@ struct HookInstaller {
             return
         }
 
+        // Copy bundled statusLine shell script (only if not already patched)
+        let statusLineScript = hooksDir.appendingPathComponent("claude-island-statusline.sh")
+        let alreadyPatched: Bool
+        if let existing = try? String(contentsOf: statusLineScript, encoding: .utf8) {
+            alreadyPatched = existing.contains("_CI_HAS_ORIGINAL=1")
+        } else {
+            alreadyPatched = false
+        }
+
+        if !alreadyPatched {
+            if let bundledSL = Bundle.main.url(forResource: "claude-island-statusline", withExtension: "sh") {
+                do {
+                    if FileManager.default.fileExists(atPath: statusLineScript.path) {
+                        try FileManager.default.removeItem(at: statusLineScript)
+                    }
+                    try FileManager.default.copyItem(at: bundledSL, to: statusLineScript)
+                    try FileManager.default.setAttributes(
+                        [.posixPermissions: 0o755],
+                        ofItemAtPath: statusLineScript.path
+                    )
+                    logger.info("StatusLine script installed at \(statusLineScript.path, privacy: .public)")
+                } catch {
+                    logger.error("Failed to install statusLine script: \(error.localizedDescription, privacy: .public)")
+                }
+            } else {
+                logger.warning("Bundled claude-island-statusline.sh not found in app bundle")
+            }
+        } else {
+            logger.info("StatusLine script already patched, skipping copy")
+        }
+
         updateSettings(at: settings)
 
         // Post-install verification
@@ -136,6 +167,9 @@ struct HookInstaller {
 
         json["hooks"] = hooks
 
+        // Configure statusLine wrapper for session metadata caching
+        configureStatusLine(in: &json)
+
         do {
             let data = try JSONSerialization.data(
                 withJSONObject: json,
@@ -146,6 +180,43 @@ struct HookInstaller {
         } catch {
             logger.error("Failed to write settings: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// Configure statusLine to use our wrapper that caches session metadata.
+    /// The wrapper script writes {model, context_pct} to $TMPDIR per session,
+    /// then passes stdin through to the user's original statusLine command.
+    private static func configureStatusLine(in json: inout [String: Any]) {
+        let wrapperCommand = "bash ~/.claude/hooks/claude-island-statusline.sh"
+
+        // Read the user's current statusLine command (if not already ours)
+        var originalCommand: String?
+        if let existing = json["statusLine"] as? [String: Any],
+           let cmd = existing["command"] as? String,
+           !cmd.contains("claude-island-statusline") {
+            originalCommand = cmd
+        }
+
+        // Patch the wrapper script to call the original command
+        if let original = originalCommand {
+            let scriptPath = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".claude/hooks/claude-island-statusline.sh")
+            if var content = try? String(contentsOf: scriptPath, encoding: .utf8) {
+                content = content.replacingOccurrences(of: "_CI_HAS_ORIGINAL=0", with: "_CI_HAS_ORIGINAL=1")
+                content = content.replacingOccurrences(of: "_CI_ORIGINAL_CMD=\"\"", with: "_CI_ORIGINAL_CMD=\"\(original)\"")
+                try? content.write(to: scriptPath, atomically: true, encoding: .utf8)
+                logger.info("Patched statusLine wrapper to call: \(original, privacy: .public)")
+            }
+        }
+
+        // Set our wrapper as the statusLine command
+        var statusLineConfig: [String: Any] = ["command": wrapperCommand]
+        // Preserve existing refreshInterval or other fields
+        if let existing = json["statusLine"] as? [String: Any] {
+            for (key, value) in existing where key != "command" {
+                statusLineConfig[key] = value
+            }
+        }
+        json["statusLine"] = statusLineConfig
     }
 
     /// Check if hooks are currently installed (all required events present)
@@ -200,9 +271,11 @@ struct HookInstaller {
             .appendingPathComponent(".claude")
         let hooksDir = claudeDir.appendingPathComponent("hooks")
         let pythonScript = hooksDir.appendingPathComponent("claude-island-state.py")
+        let statusLineScript = hooksDir.appendingPathComponent("claude-island-statusline.sh")
         let settings = claudeDir.appendingPathComponent("settings.json")
 
         try? FileManager.default.removeItem(at: pythonScript)
+        try? FileManager.default.removeItem(at: statusLineScript)
 
         guard let data = try? Data(contentsOf: settings),
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -234,6 +307,13 @@ struct HookInstaller {
             json.removeValue(forKey: "hooks")
         } else {
             json["hooks"] = hooks
+        }
+
+        // Remove statusLine if it's ours
+        if let statusLine = json["statusLine"] as? [String: Any],
+           let cmd = statusLine["command"] as? String,
+           cmd.contains("claude-island-statusline") {
+            json.removeValue(forKey: "statusLine")
         }
 
         if let data = try? JSONSerialization.data(
