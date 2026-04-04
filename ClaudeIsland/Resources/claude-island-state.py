@@ -279,6 +279,13 @@ def main():
 
     elif event == "SessionEnd":
         state["status"] = "ended"
+        # Clean up statusLine cache file for this session
+        tmpdir = os.environ.get("TMPDIR", "/tmp/")
+        cache_file = os.path.join(tmpdir, f"claude-island-session-{session_id}.json")
+        try:
+            os.unlink(cache_file)
+        except OSError:
+            pass
 
     elif event == "PreCompact":
         # Context is being compacted (manual or auto)

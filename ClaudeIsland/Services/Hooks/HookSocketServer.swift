@@ -35,7 +35,6 @@ struct HookEvent: Codable, Sendable {
         case message
     }
 
-    /// Create a copy with updated toolUseId
     init(sessionId: String, cwd: String, event: String, status: String, pid: Int?, tty: String?, tool: String?, toolInput: [String: AnyCodable]?, toolUseId: String?, notificationType: String?, message: String?) {
         self.sessionId = sessionId
         self.cwd = cwd
