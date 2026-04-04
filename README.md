@@ -5,12 +5,7 @@
     A macOS menu bar app that brings Dynamic Island-style notifications to Claude Code CLI sessions.
     <br />
     <br />
-    <a href="https://github.com/z3roll/claude-island/releases/latest" target="_blank" rel="noopener noreferrer">
-      <img src="https://img.shields.io/github/v/release/z3roll/claude-island?style=rounded&color=white&labelColor=000000&label=release" alt="Release Version" />
-    </a>
-    <a href="https://github.com/z3roll/claude-island/releases" target="_blank" rel="noopener noreferrer">
-      <img alt="GitHub Downloads" src="https://img.shields.io/github/downloads/z3roll/claude-island/total?style=rounded&color=white&labelColor=000000">
-    </a>
+    <a href="https://github.com/z3roll/claude-island/releases/latest" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/github/v/release/z3roll/claude-island?style=rounded&color=white&labelColor=000000&label=release" alt="Release Version" /></a>&nbsp;<a href="https://github.com/z3roll/claude-island/releases" target="_blank" rel="noopener noreferrer"><img alt="GitHub Downloads" src="https://img.shields.io/github/downloads/z3roll/claude-island/total?style=rounded&color=white&labelColor=000000"></a>
   </p>
 </div>
 
