@@ -5,11 +5,11 @@
     A macOS menu bar app that brings Dynamic Island-style notifications to Claude Code CLI sessions.
     <br />
     <br />
-    <a href="https://github.com/farouqaldori/claude-island/releases/latest" target="_blank" rel="noopener noreferrer">
-      <img src="https://img.shields.io/github/v/release/farouqaldori/claude-island?style=rounded&color=white&labelColor=000000&label=release" alt="Release Version" />
+    <a href="https://github.com/z3roll/claude-island/releases/latest" target="_blank" rel="noopener noreferrer">
+      <img src="https://img.shields.io/github/v/release/z3roll/claude-island?style=rounded&color=white&labelColor=000000&label=release" alt="Release Version" />
     </a>
-    <a href="#" target="_blank" rel="noopener noreferrer">
-      <img alt="GitHub Downloads" src="https://img.shields.io/github/downloads/farouqaldori/claude-island/total?style=rounded&color=white&labelColor=000000">
+    <a href="https://github.com/z3roll/claude-island/releases" target="_blank" rel="noopener noreferrer">
+      <img alt="GitHub Downloads" src="https://img.shields.io/github/downloads/z3roll/claude-island/total?style=rounded&color=white&labelColor=000000">
     </a>
   </p>
 </div>
@@ -20,6 +20,9 @@
 - **Live Session Monitoring** — Track multiple Claude Code sessions in real-time
 - **Permission Approvals** — Approve or deny tool executions directly from the notch
 - **Chat History** — View full conversation history with markdown rendering
+- **Token Usage** — 5h/7d usage percentage with recovery time
+- **Model & Context** — Per-session model name and context window percentage
+- **Companion Pet** — Renders your Claude companion as animated ASCII art
 - **Auto-Setup** — Hooks install automatically on first launch
 
 ## Requirements
@@ -29,27 +32,18 @@
 
 ## Install
 
-Download the latest release or build from source:
+Download the latest release DMG, or build from source:
 
 ```bash
-xcodebuild -scheme ClaudeIsland -configuration Release build
+./scripts/build.sh
 ```
 
 ## How It Works
 
 Claude Island installs hooks into `~/.claude/hooks/` that communicate session state via a Unix socket. The app listens for events and displays them in the notch overlay.
 
-When Claude needs permission to run a tool, the notch expands with approve/deny buttons—no need to switch to the terminal.
-
-## Analytics
-
-Claude Island uses Mixpanel to collect anonymous usage data:
-
-- **App Launched** — App version, build number, macOS version
-- **Session Started** — When a new Claude Code session is detected
-
-No personal data or conversation content is collected.
+When Claude needs permission to run a tool, the notch expands with approve/deny buttons — no need to switch to the terminal.
 
 ## License
 
-Apache 2.0
+Based on [farouqaldori/claude-island](https://github.com/farouqaldori/claude-island). Apache 2.0.
