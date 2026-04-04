@@ -20,11 +20,11 @@
 - **Live Session Monitoring** — Track multiple Claude Code sessions in real-time
 - **Permission Approvals** — Approve or deny tool executions directly from the notch
 - **Chat History** — View full conversation history with markdown rendering
+- **Terminal Focus** — Activate and restore minimized terminal windows from the notch
 - **Auto-Setup** — Hooks install automatically on first launch
-- <img src="https://img.shields.io/badge/NEW-ff6b6b?style=flat-square&logo=sparkles&logoColor=white&labelColor=ff6b6b" alt="NEW" /> **Token Usage** — 5h/7d usage percentage with recovery time
-- <img src="https://img.shields.io/badge/NEW-ff6b6b?style=flat-square&logo=sparkles&logoColor=white&labelColor=ff6b6b" alt="NEW" /> **Model & Context** — Per-session model name and context window percentage
-- <img src="https://img.shields.io/badge/NEW-ff6b6b?style=flat-square&logo=sparkles&logoColor=white&labelColor=ff6b6b" alt="NEW" /> **Companion Pet** — Renders your Claude companion as animated ASCII art
-- <img src="https://img.shields.io/badge/NEW-ff6b6b?style=flat-square&logo=sparkles&logoColor=white&labelColor=ff6b6b" alt="NEW" /> **Terminal Focus** — Activate and restore minimized terminal windows from the notch
+- 🔴 **NEW!** **Token Usage** — 5h/7d usage percentage with recovery time
+- 🔴 **NEW!** **Model & Context** — Per-session model name and context window percentage
+- 🔴 **NEW!** **Companion Pet** — Renders your Claude companion as animated ASCII art
 
 ## Requirements
 
