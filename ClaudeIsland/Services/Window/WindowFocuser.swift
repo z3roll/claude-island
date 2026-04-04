@@ -25,62 +25,34 @@ actor WindowFocuser {
     /// Focus a terminal window by its bundle ID.
     /// This is the main entry point — works without yabai.
     func focusTerminalApp(bundleId: String) async -> Bool {
-        // NSWorkspace and NSRunningApplication APIs require the main thread
         return await MainActor.run {
             guard let app = NSWorkspace.shared.runningApplications.first(where: {
                 $0.bundleIdentifier == bundleId
-            }) else {
-                logger.debug("No running app with bundle ID: \(bundleId, privacy: .public)")
-                return false
+            }) else { return false }
+
+            if app.isHidden {
+                app.unhide()
             }
 
-            let activated = app.activate()
-            if activated {
-                logger.info("Activated app: \(bundleId, privacy: .public)")
-            } else {
-                logger.warning("Failed to activate app: \(bundleId, privacy: .public)")
-            }
-            return activated
+            // Use `open -a` to activate and restore minimized windows.
+            // AXUIElement deminiaturize causes side effects (e.g., Ghostty tab switching).
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            task.arguments = ["-b", bundleId]
+            try? task.run()
+
+            return true
         }
     }
 
-    /// Focus a terminal and try to target the correct tab/pane
-    /// Strategy: AppleScript tab targeting → tmux pane switch → app activate fallback
+    /// Focus a terminal: just activate the app and restore minimized windows.
+    /// Does NOT attempt to switch tabs (unreliable across terminal emulators).
     func focusTerminal(info: TerminalAppInfo, sessionPid: Int?, cachedTTY: String? = nil) async -> Bool {
-        // Step 1: Try AppleScript tab/pane targeting if supported and we have a PID
-        if let pid = sessionPid, info.supportsTabFocus {
-            let tabFocused = await focusTabByAppleScript(
-                terminalType: info.type,
-                bundleId: info.bundleIds.first ?? "",
-                claudePid: pid,
-                cachedTTY: cachedTTY
-            )
-            if tabFocused {
-                return true
-            }
-        }
-
-        // Step 2: Try tmux pane targeting if we have a PID
-        if let pid = sessionPid {
-            let tmuxFocused = await focusTmuxPane(claudePid: pid)
-            if tmuxFocused {
-                // Also activate the terminal app window (best-effort, tmux pane already switched)
-                for bundleId in info.bundleIds {
-                    if await focusTerminalApp(bundleId: bundleId) {
-                        break
-                    }
-                }
-                return true
-            }
-        }
-
-        // Step 3: Fallback — just activate the app
         for bundleId in info.bundleIds {
             if await focusTerminalApp(bundleId: bundleId) {
                 return true
             }
         }
-
         return false
     }
 
@@ -114,6 +86,8 @@ actor WindowFocuser {
 
         return false
     }
+
+
 
     // MARK: - tmux pane targeting
 
