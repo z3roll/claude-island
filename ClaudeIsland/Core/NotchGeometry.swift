@@ -42,9 +42,9 @@ struct NotchGeometry: Sendable {
         notchScreenRect.insetBy(dx: -10, dy: -5).contains(point)
     }
 
-    /// Check if a point is in the opened panel area
+    /// Check if a point is in the opened panel area (fallback when real frame not available)
     func isPointInOpenedPanel(_ point: CGPoint, size: CGSize) -> Bool {
-        openedScreenRect(for: size).contains(point)
+        openedScreenRect(for: size).insetBy(dx: -10, dy: -10).contains(point)
     }
 
     /// Check if a point is outside the opened panel (for closing)

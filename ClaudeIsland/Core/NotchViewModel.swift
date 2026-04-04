@@ -48,6 +48,9 @@ class NotchViewModel: ObservableObject {
     @Published var contentType: NotchContentType = .instances
     @Published var isHovering: Bool = false
 
+    /// Actual rendered panel frame in screen coordinates (set by GeometryReader in NotchView)
+    var panelScreenFrame: CGRect = .zero
+
     // MARK: - Dependencies
 
     private let screenSelector = ScreenSelector.shared
@@ -64,31 +67,20 @@ class NotchViewModel: ObservableObject {
     var windowHeight: CGFloat { geometry.windowHeight }
 
     /// Dynamic opened size based on content type
+    private var panelWidth: CGFloat {
+        min(screenRect.width * 0.5, 640)
+    }
+
     var openedSize: CGSize {
         switch contentType {
         case .chat:
-            // Large size for chat view
-            return CGSize(
-                width: min(screenRect.width * 0.5, 600),
-                height: 580
-            )
+            return CGSize(width: panelWidth, height: 580)
         case .question:
-            // Compact size for question panel
-            return CGSize(
-                width: min(screenRect.width * 0.4, 480),
-                height: 380
-            )
+            return CGSize(width: panelWidth, height: 380)
         case .menu:
-            // Compact size for settings menu
-            return CGSize(
-                width: min(screenRect.width * 0.4, 480),
-                height: 420 + screenSelector.expandedPickerHeight + soundSelector.totalSoundSectionHeight
-            )
+            return CGSize(width: panelWidth, height: 420 + screenSelector.expandedPickerHeight + soundSelector.totalSoundSectionHeight)
         case .instances:
-            return CGSize(
-                width: min(screenRect.width * 0.4, 480),
-                height: 320
-            )
+            return CGSize(width: panelWidth, height: 320)
         }
     }
 
@@ -161,7 +153,13 @@ class NotchViewModel: ObservableObject {
 
     private func handleMouseMove(_ location: CGPoint) {
         let inNotch = geometry.isPointInNotch(location)
-        let inOpened = status == .opened && geometry.isPointInOpenedPanel(location, size: openedSize)
+        // Use the actual rendered panel frame if available, otherwise fall back to calculated rect
+        let inOpened: Bool
+        if status == .opened && panelScreenFrame != .zero {
+            inOpened = panelScreenFrame.contains(location)
+        } else {
+            inOpened = status == .opened && geometry.isPointInOpenedPanel(location, size: openedSize)
+        }
 
         let newHovering = inNotch || inOpened
 
@@ -174,14 +172,16 @@ class NotchViewModel: ObservableObject {
         hoverTimer?.cancel()
         hoverTimer = nil
 
-        // Start hover timer to auto-expand after 1 second
-        if isHovering && (status == .closed || status == .popping) {
-            let workItem = DispatchWorkItem { [weak self] in
-                guard let self = self, self.isHovering else { return }
-                self.notchOpen(reason: .hover)
+        if isHovering {
+            // Auto-expand immediately on hover
+            if status == .closed || status == .popping {
+                notchOpen(reason: .hover)
             }
-            hoverTimer = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
+        } else {
+            // Auto-close when mouse leaves (only for hover-opened, not click-opened)
+            if status == .opened && openReason == .hover {
+                notchClose()
+            }
         }
     }
 
@@ -194,12 +194,10 @@ class NotchViewModel: ObservableObject {
                 notchClose()
                 // Re-post the click so it reaches the window/app behind us
                 repostClickAt(location)
-            } else if geometry.notchScreenRect.contains(location) {
-                // Clicking notch while opened - only close if NOT in chat mode
-                if !isInChatMode {
-                    notchClose()
-                }
             }
+            // Note: clicking inside the panel (including the notch header area) is handled
+            // by SwiftUI buttons. Do NOT close here — closing removes the window and causes
+            // the mouseUp event to leak to the app behind (e.g., Ghostty's tab bar).
         case .closed, .popping:
             if geometry.isPointInNotch(location) {
                 notchOpen(reason: .click)

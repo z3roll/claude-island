@@ -91,23 +91,16 @@ struct ClaudeInstancesView: View {
 
     private func focusSession(_ session: SessionState) {
         Task {
-            // Strategy 1: Use resolved terminal info for precise jumping
             if let terminal = session.resolvedTerminal {
                 _ = await WindowFocuser.shared.focusTerminal(
                     info: terminal.appInfo,
                     sessionPid: session.pid,
                     cachedTTY: terminal.tty
                 )
-                return
-            }
-
-            // Strategy 2: Legacy yabai path for tmux sessions
-            if session.isInTmux {
-                if let pid = session.pid {
-                    _ = await YabaiController.shared.focusWindow(forClaudePid: pid)
-                } else {
-                    _ = await YabaiController.shared.focusWindow(forWorkingDirectory: session.cwd)
-                }
+            } else {
+                // Fallback: activate any known terminal app by bundle ID
+                // or just open Terminal.app as last resort
+                _ = await WindowFocuser.shared.focusTerminalApp(bundleId: "com.apple.Terminal")
             }
         }
     }
@@ -149,9 +142,25 @@ struct InstanceRow: View {
     let onAnswer: ([String: String]) -> Void
     let onOpenQuestion: () -> Void
 
+    @ObservedObject private var metadataService = SessionMetadataService.shared
     @State private var isHovered = false
     @State private var spinnerPhase = 0
     @State private var isPreviewExpanded = true
+
+    /// Strip parenthetical suffix like "(1M context)" from model display name
+    private static func shortModelName(_ name: String) -> String {
+        if let range = name.range(of: " (") {
+            return String(name[name.startIndex..<range.lowerBound])
+        }
+        return name
+    }
+
+    private func instanceContextColor(_ pct: Double) -> Color {
+        if pct >= 90 { return Color(red: 0.95, green: 0.3, blue: 0.3) }
+        if pct >= 70 { return Color(red: 0.95, green: 0.55, blue: 0.25) }
+        if pct >= 50 { return Color(red: 0.95, green: 0.8, blue: 0.3) }
+        return Color(red: 0.4, green: 0.85, blue: 0.45)
+    }
 
     private let claudeOrange = Color(red: 0.85, green: 0.47, blue: 0.34)
     private let spinnerSymbols = ["·", "✢", "✳", "∗", "✻", "✽"]
@@ -217,14 +226,15 @@ struct InstanceRow: View {
                 .frame(width: 14)
 
             // Text content
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 4) {
                     Text(session.displayTitle)
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(.white)
                         .lineLimit(1)
+                        .truncationMode(.middle)
 
-                    // Terminal badge (small, subtle)
+                    // Terminal badge
                     if let terminalName = session.terminalDisplayName {
                         Text(terminalName)
                             .font(.system(size: 9, weight: .medium))
@@ -233,6 +243,28 @@ struct InstanceRow: View {
                             .padding(.vertical, 1)
                             .background(Color.white.opacity(0.06))
                             .clipShape(Capsule())
+                    }
+
+                    // Model + context badges
+                    if let meta = metadataService.metadata(for: session.sessionId) {
+                        if let model = meta.model {
+                            Text(Self.shortModelName(model))
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(.white.opacity(0.25))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.white.opacity(0.06))
+                                .clipShape(Capsule())
+                        }
+                        if let ctx = meta.contextPercentage {
+                            Text("context:\(String(format: "%.0f", ctx))%")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(.white.opacity(0.25))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.white.opacity(0.06))
+                                .clipShape(Capsule())
+                        }
                     }
                 }
 

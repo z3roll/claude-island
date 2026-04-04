@@ -19,6 +19,7 @@ struct NotchView: View {
     @ObservedObject var viewModel: NotchViewModel
     @StateObject private var sessionMonitor = ClaudeSessionMonitor()
     @StateObject private var activityCoordinator = NotchActivityCoordinator.shared
+    @StateObject private var companionService = CompanionService.shared
     @ObservedObject private var updateManager = UpdateManager.shared
     private let soundSelector = SoundSelector.shared
     @State private var previousPendingIds: Set<String> = []
@@ -138,7 +139,7 @@ struct NotchView: View {
 
     // Animation springs
     private let openAnimation = Animation.spring(response: 0.42, dampingFraction: 0.8, blendDuration: 0)
-    private let closeAnimation = Animation.spring(response: 0.45, dampingFraction: 1.0, blendDuration: 0)
+    private let closeAnimation = Animation.spring(response: 0.35, dampingFraction: 0.9, blendDuration: 0)
 
     // MARK: - Body
 
@@ -183,6 +184,19 @@ struct NotchView: View {
                     .animation(.smooth, value: hasWaitingForInput)
                     .animation(.spring(response: 0.3, dampingFraction: 0.5), value: isBouncing)
                     .contentShape(Rectangle())
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear.onAppear {
+                                updatePanelFrame(geo)
+                            }
+                            .onChange(of: viewModel.status) { _, _ in
+                                updatePanelFrame(geo)
+                            }
+                            .onChange(of: viewModel.contentType) { _, _ in
+                                updatePanelFrame(geo)
+                            }
+                        }
+                    )
                     .onHover { hovering in
                         withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) {
                             isHovering = hovering
@@ -246,7 +260,9 @@ struct NotchView: View {
                             insertion: .scale(scale: 0.8, anchor: .top)
                                 .combined(with: .opacity)
                                 .animation(.smooth(duration: 0.35)),
-                            removal: .opacity.animation(.easeOut(duration: 0.15))
+                            removal: .scale(scale: 0.3, anchor: .top)
+                                .combined(with: .opacity)
+                                .animation(.easeIn(duration: 0.2))
                         )
                     )
             }
@@ -316,6 +332,7 @@ struct NotchView: View {
                         .frame(width: viewModel.status == .opened ? 20 : sideWidth)
                 }
             }
+
         }
         .frame(height: closedNotchSize.height)
     }
@@ -328,7 +345,7 @@ struct NotchView: View {
 
     @ViewBuilder
     private var openedHeaderContent: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             // Show static crab only if not showing activity in headerRow
             // (headerRow handles crab + indicator when showClosedActivity is true)
             if !showClosedActivity {
@@ -336,6 +353,10 @@ struct NotchView: View {
                     .matchedGeometryEffect(id: "crab", in: activityNamespace, isSource: !showClosedActivity)
                     .padding(.leading, 8)
             }
+
+            // Token usage display (left side, after crab)
+            TokenUsageBadge()
+                .padding(.leading, showClosedActivity ? 8 : 0)
 
             Spacer()
 
@@ -449,6 +470,21 @@ struct NotchView: View {
                 }
             }
         }
+    }
+
+    private func updatePanelFrame(_ geo: GeometryProxy) {
+        // Convert the panel's local frame to screen coordinates
+        let localFrame = geo.frame(in: .global)
+        guard let screen = NSScreen.main else { return }
+        let screenHeight = screen.frame.height
+        // SwiftUI global coordinates have Y=0 at top, NSScreen has Y=0 at bottom
+        let screenFrame = CGRect(
+            x: localFrame.origin.x,
+            y: screenHeight - localFrame.origin.y - localFrame.height,
+            width: localFrame.width,
+            height: localFrame.height
+        )
+        viewModel.panelScreenFrame = screenFrame
     }
 
     private func handleStatusChange(from oldStatus: NotchStatus, to newStatus: NotchStatus) {

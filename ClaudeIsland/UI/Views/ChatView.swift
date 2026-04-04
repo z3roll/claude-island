@@ -17,6 +17,7 @@ struct ChatView: View {
     @State private var inputText: String = ""
     @State private var history: [ChatHistoryItem] = []
     @State private var session: SessionState
+    @ObservedObject private var metadataService = SessionMetadataService.shared
     @State private var isLoading: Bool = true
     @State private var hasLoadedOnce: Bool = false
     @State private var shouldScrollToBottom: Bool = false
@@ -52,41 +53,44 @@ struct ChatView: View {
     }
 
     
+    @StateObject private var companionService = CompanionService.shared
+
     var body: some View {
-        ZStack {
-            VStack(spacing: 0) {
-                // Header
-                chatHeader
+        VStack(spacing: 0) {
+            // Header
+            chatHeader
 
-                // Messages
-                if isLoading {
-                    loadingState
-                } else if history.isEmpty {
-                    emptyState
+            // Messages
+            if isLoading {
+                loadingState
+            } else if history.isEmpty {
+                emptyState
+            } else {
+                messageList
+            }
+
+            // Approval bar, interactive prompt, or Input bar
+            if let tool = approvalTool {
+                if tool == "AskUserQuestion" {
+                    interactivePromptBar
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .move(edge: .bottom)),
+                            removal: .opacity
+                        ))
                 } else {
-                    messageList
+                    approvalBar(tool: tool)
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .move(edge: .bottom)),
+                            removal: .opacity
+                        ))
                 }
-
-                // Approval bar, interactive prompt, or Input bar
-                if let tool = approvalTool {
-                    if tool == "AskUserQuestion" {
-                        // Interactive tools - show prompt to answer in terminal
-                        interactivePromptBar
-                            .transition(.asymmetric(
-                                insertion: .opacity.combined(with: .move(edge: .bottom)),
-                                removal: .opacity
-                            ))
-                    } else {
-                        approvalBar(tool: tool)
-                            .transition(.asymmetric(
-                                insertion: .opacity.combined(with: .move(edge: .bottom)),
-                                removal: .opacity
-                            ))
-                    }
-                } else {
+            } else {
+                HStack(alignment: .bottom, spacing: 4) {
                     inputBar
-                        .transition(.opacity)
+                    CompanionSpriteView(companion: companionService, fontSize: 15)
+                        .padding(.bottom, 6)
                 }
+                .transition(.opacity)
             }
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: isWaitingForApproval)
@@ -96,15 +100,18 @@ struct ChatView: View {
             guard !hasLoadedOnce else { return }
             hasLoadedOnce = true
 
-            // Check if already loaded (from previous visit)
+            // Check if already loaded with content (from previous visit)
             if ChatHistoryManager.shared.isLoaded(sessionId: sessionId) {
-                history = ChatHistoryManager.shared.history(for: sessionId)
-                isLoading = false
-                return
+                let cached = ChatHistoryManager.shared.history(for: sessionId)
+                if !cached.isEmpty {
+                    history = cached
+                    isLoading = false
+                    return
+                }
             }
 
-            // Load in background, show loading state
-            await ChatHistoryManager.shared.loadFromFile(sessionId: sessionId, cwd: session.cwd)
+            // Load/sync from JSONL file
+            await ChatHistoryManager.shared.syncFromFile(sessionId: sessionId, cwd: session.cwd)
             history = ChatHistoryManager.shared.history(for: sessionId)
 
             withAnimation(.easeOut(duration: 0.2)) {
@@ -181,32 +188,78 @@ struct ChatView: View {
 
     @State private var isHeaderHovered = false
 
-    private var chatHeader: some View {
-        Button {
-            viewModel.exitChat()
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.white.opacity(isHeaderHovered ? 1.0 : 0.6))
-                    .frame(width: 24, height: 24)
+    private func contextColor(_ pct: Double) -> Color {
+        if pct >= 90 { return Color(red: 0.95, green: 0.3, blue: 0.3) }
+        if pct >= 70 { return Color(red: 0.95, green: 0.55, blue: 0.25) }
+        if pct >= 50 { return Color(red: 0.95, green: 0.8, blue: 0.3) }
+        return Color(red: 0.4, green: 0.85, blue: 0.45)
+    }
 
-                Text(session.displayTitle)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.white.opacity(isHeaderHovered ? 1.0 : 0.85))
-                    .lineLimit(1)
-
-                Spacer()
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(isHeaderHovered ? Color.white.opacity(0.08) : Color.clear)
-            )
+    private func shortModelName(_ name: String) -> String {
+        if let range = name.range(of: " (") {
+            return String(name[name.startIndex..<range.lowerBound])
         }
-        .buttonStyle(.plain)
-        .onHover { isHeaderHovered = $0 }
+        return name
+    }
+
+    private var chatHeader: some View {
+        HStack(spacing: 0) {
+            Button {
+                viewModel.exitChat()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white.opacity(isHeaderHovered ? 1.0 : 0.6))
+
+                    Text(session.displayTitle)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white.opacity(isHeaderHovered ? 1.0 : 0.85))
+                        .lineLimit(1)
+                }
+            }
+            .buttonStyle(.plain)
+            .onHover { isHeaderHovered = $0 }
+
+            Spacer()
+
+            // Terminal + Model + Context badges (card style)
+            HStack(spacing: 4) {
+                if let terminal = session.resolvedTerminal {
+                    Text(terminal.appInfo.type.rawValue)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(.white.opacity(0.3))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Color.white.opacity(0.06))
+                        .clipShape(Capsule())
+                }
+
+                if let meta = SessionMetadataService.shared.metadata(for: sessionId) {
+                    if let model = meta.model {
+                        Text(shortModelName(model))
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundColor(.white.opacity(0.25))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.white.opacity(0.06))
+                            .clipShape(Capsule())
+                    }
+
+                    if let ctx = meta.contextPercentage {
+                        Text("context:\(String(format: "%.0f", ctx))%")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundColor(.white.opacity(0.25))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.white.opacity(0.06))
+                            .clipShape(Capsule())
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(Color.black.opacity(0.2))
@@ -446,7 +499,14 @@ struct ChatView: View {
 
     private func focusTerminal() {
         Task {
-            if let pid = session.pid {
+            // Use the same path as ClaudeInstancesView for consistency
+            if let terminal = session.resolvedTerminal {
+                _ = await WindowFocuser.shared.focusTerminal(
+                    info: terminal.appInfo,
+                    sessionPid: session.pid,
+                    cachedTTY: terminal.tty
+                )
+            } else if let pid = session.pid {
                 _ = await YabaiController.shared.focusWindow(forClaudePid: pid)
             } else {
                 _ = await YabaiController.shared.focusWindow(forWorkingDirectory: session.cwd)
