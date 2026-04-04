@@ -44,6 +44,12 @@ Claude Island installs hooks into `~/.claude/hooks/` that communicate session st
 
 When Claude needs permission to run a tool, the notch expands with approve/deny buttons — no need to switch to the terminal.
 
+## Credits
+
+This project is a derivative work based on [farouqaldori/claude-island](https://github.com/farouqaldori/claude-island) (v1.2, Dec 2025). The original project provided the core notch UI, hook system, and session monitoring framework.
+
+New features in this fork: JSONL path resolution fix, token usage display, per-session model/context info, companion pet rendering, terminal focus improvements, and various UI enhancements.
+
 ## License
 
-Based on [farouqaldori/claude-island](https://github.com/farouqaldori/claude-island). Apache 2.0.
+Apache 2.0 — see [LICENSE.md](LICENSE.md).
