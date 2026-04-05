@@ -133,18 +133,28 @@ actor SessionStore {
             Mixpanel.mainInstance().track(event: "Session Started")
         }
 
+        // Update cwd from hook event (may change if user switches project)
+        if !event.cwd.isEmpty {
+            session.cwd = event.cwd
+            session.projectName = URL(fileURLWithPath: event.cwd).lastPathComponent
+        }
         session.pid = event.pid
         if let pid = event.pid {
             let tree = ProcessTreeBuilder.shared.buildTree()
-            session.isInTmux = ProcessTreeBuilder.shared.isInTmux(pid: pid, tree: tree)
+            let detectedTmux = ProcessTreeBuilder.shared.isInTmux(pid: pid, tree: tree)
+            // Only upgrade to tmux, never downgrade (process tree can be transiently incomplete)
+            if detectedTmux {
+                session.isInTmux = true
+            }
 
             // Resolve terminal app if not already resolved (reuse the tree we just built)
             if session.resolvedTerminal == nil {
                 session.resolvedTerminal = TerminalResolver.shared.resolve(claudePid: pid, tree: tree)
                 if let terminal = session.resolvedTerminal {
                     Self.logger.debug("Resolved terminal: \(terminal.appInfo.displayName, privacy: .public) for session \(sessionId.prefix(8), privacy: .public)")
-                    // Update isInTmux from resolved terminal (more accurate)
-                    session.isInTmux = terminal.isInTmux
+                    if terminal.isInTmux {
+                        session.isInTmux = true
+                    }
                 }
             }
         }
@@ -182,6 +192,12 @@ actor SessionStore {
 
         if event.event == "Stop" {
             session.subagentState = SubagentState()
+            session.phase = .waitingForInput
+        }
+
+        // Clear interrupted flag when user starts a new prompt
+        if event.event == "UserPromptSubmit" {
+            session.wasInterrupted = false
         }
 
         sessions[sessionId] = session
@@ -194,14 +210,27 @@ actor SessionStore {
     }
 
     private func createSession(from event: HookEvent) -> SessionState {
-        SessionState(
+        // Try to read startedAt from session JSON file
+        var createdAt = Date()
+        if let pid = event.pid {
+            let sessionFile = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".claude/sessions/\(pid).json")
+            if let data = try? Data(contentsOf: sessionFile),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let startedAtMs = json["startedAt"] as? Double {
+                createdAt = Date(timeIntervalSince1970: startedAtMs / 1000)
+            }
+        }
+
+        return SessionState(
             sessionId: event.sessionId,
             cwd: event.cwd,
             projectName: URL(fileURLWithPath: event.cwd).lastPathComponent,
             pid: event.pid,
             tty: event.tty?.replacingOccurrences(of: "/dev/", with: ""),
             isInTmux: false,  // Will be updated
-            phase: .idle
+            phase: .idle,
+            createdAt: createdAt
         )
     }
 
@@ -384,11 +413,13 @@ actor SessionStore {
     private func processToolCompleted(sessionId: String, toolUseId: String, result: ToolCompletionResult) async {
         guard var session = sessions[sessionId] else { return }
 
-        // Check if this tool is already completed (avoid duplicate processing)
+        // If already completed AND result is populated, skip. But if the status
+        // was set by PostToolUse hook (which doesn't fill in result), we need
+        // to populate result/structuredResult now.
         if let existingItem = session.chatItems.first(where: { $0.id == toolUseId }),
            case .toolCall(let tool) = existingItem.type,
-           tool.status == .success || tool.status == .error || tool.status == .interrupted {
-            // Already completed, skip
+           (tool.status == .success || tool.status == .error || tool.status == .interrupted),
+           (tool.result != nil || tool.structuredResult != nil) {
             return
         }
 
@@ -750,8 +781,13 @@ actor SessionStore {
             let item = session.chatItems[i]
             guard case .toolCall(var tool) = item.type else { continue }
 
-            // Only process tools that are running or waiting but have results in JSONL
-            guard tool.status == .running || tool.status == .waitingForApproval else { continue }
+            // Process tools that are still running/waiting, OR tools already
+            // marked .success/.error by the PostToolUse hook but missing results
+            // (which we need from JSONL parsing).
+            let needsResultFill = (tool.status == .success || tool.status == .error)
+                && tool.result == nil && tool.structuredResult == nil
+            let isPending = tool.status == .running || tool.status == .waitingForApproval
+            guard isPending || needsResultFill else { continue }
             guard completedToolIds.contains(item.id) else { continue }
 
             let result = ToolCompletionResult.from(
@@ -900,10 +936,9 @@ actor SessionStore {
             }
         }
 
-        // Transition to idle
-        if session.phase.canTransition(to: .idle) {
-            session.phase = .idle
-        }
+        // Transition to waitingForInput and mark as interrupted
+        session.wasInterrupted = true
+        session.phase = .waitingForInput
 
         sessions[sessionId] = session
     }
@@ -998,6 +1033,18 @@ actor SessionStore {
         session.chatItems.sort { $0.timestamp < $1.timestamp }
 
         sessions[sessionId] = session
+    }
+
+    // MARK: - Mark As Read
+
+    /// Transition a session from waitingForInput to idle (user acknowledged)
+    func markAsRead(sessionId: String) {
+        guard var session = sessions[sessionId] else { return }
+        if session.phase == .waitingForInput {
+            session.phase = .idle
+            sessions[sessionId] = session
+            publishState()
+        }
     }
 
     // MARK: - File Sync Scheduling

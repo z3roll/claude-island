@@ -14,8 +14,8 @@ struct SessionState: Equatable, Identifiable, Sendable {
     // MARK: - Identity
 
     let sessionId: String
-    let cwd: String
-    let projectName: String
+    var cwd: String
+    var projectName: String
 
     // MARK: - Instance Metadata
 
@@ -56,6 +56,11 @@ struct SessionState: Equatable, Identifiable, Sendable {
     /// This removes pre-/clear items that no longer exist in the JSONL
     var needsClearReconciliation: Bool
 
+    // MARK: - Interrupt State
+
+    /// Whether the session was interrupted (ESC) rather than completing normally
+    var wasInterrupted: Bool
+
     // MARK: - Timestamps
 
     var lastActivity: Date
@@ -84,6 +89,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
             lastToolName: nil, firstUserMessage: nil, lastUserMessageDate: nil
         ),
         needsClearReconciliation: Bool = false,
+        wasInterrupted: Bool = false,
         lastActivity: Date = Date(),
         createdAt: Date = Date()
     ) {
@@ -100,6 +106,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
         self.subagentState = subagentState
         self.conversationInfo = conversationInfo
         self.needsClearReconciliation = needsClearReconciliation
+        self.wasInterrupted = wasInterrupted
         self.lastActivity = lastActivity
         self.createdAt = createdAt
     }

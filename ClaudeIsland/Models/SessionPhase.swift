@@ -121,6 +121,8 @@ enum SessionPhase: Sendable {
             return true  // Direct question on idle session
         case (.idle, .compacting):
             return true
+        case (.idle, .waitingForInput):
+            return true  // Stop/interrupt while idle
 
         // Processing transitions
         case (.processing, .waitingForInput):

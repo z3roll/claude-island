@@ -30,14 +30,59 @@ class ClaudeSessionMonitor: ObservableObject {
 
     // MARK: - Monitoring Lifecycle
 
+    /// Scan active Claude sessions and reload their chat history from JSONL.
+    /// Safe to call repeatedly.
+    func rescanSessions() {
+        Task {
+            let discovered = await ExistingSessionScanner.shared.scan()
+            for session in discovered {
+                let event = HookEvent(
+                    sessionId: session.sessionId,
+                    cwd: session.cwd,
+                    event: "Notification",
+                    status: "waiting_for_input",
+                    pid: session.pid,
+                    tty: session.tty,
+                    tool: nil,
+                    toolInput: nil,
+                    toolUseId: nil,
+                    notificationType: "idle_prompt",
+                    message: nil
+                )
+                await SessionStore.shared.process(.hookReceived(event))
+
+                InterruptWatcherManager.shared.startWatching(
+                    sessionId: session.sessionId,
+                    cwd: session.cwd
+                )
+            }
+            for session in discovered {
+                Task { @MainActor in
+                    // Full re-sync from JSONL (forces reload even if already loaded)
+                    await ChatHistoryManager.shared.syncFromFile(sessionId: session.sessionId, cwd: session.cwd)
+                }
+            }
+        }
+    }
+
     func startMonitoring() {
+        rescanSessions()
+        // Refresh whenever hooks are toggled on.
+        NotificationCenter.default.addObserver(
+            forName: .claudeIslandHooksInstalled,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.rescanSessions()
+        }
+
         HookSocketServer.shared.start(
             onEvent: { event in
                 Task {
                     await SessionStore.shared.process(.hookReceived(event))
                 }
 
-                if event.sessionPhase == .processing {
+                if event.status != "ended" {
                     Task { @MainActor in
                         InterruptWatcherManager.shared.startWatching(
                             sessionId: event.sessionId,
@@ -174,9 +219,7 @@ extension ClaudeSessionMonitor: JSONLInterruptWatcherDelegate {
         Task {
             await SessionStore.shared.process(.interruptDetected(sessionId: sessionId))
         }
-
-        Task { @MainActor in
-            InterruptWatcherManager.shared.stopWatching(sessionId: sessionId)
-        }
+        // Do NOT stop watching — user may resume and ESC again.
+        // Watcher is stopped only on session end.
     }
 }
