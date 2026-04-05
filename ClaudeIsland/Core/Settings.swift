@@ -229,6 +229,14 @@ enum AppSettings {
             "soundEvent_\(event.settingsKey)"
         }
         static let soundMigrated = "soundSettingsMigrated_v2"
+        static let alwaysShowNotch = "alwaysShowNotch"
+    }
+
+    // MARK: - Notch Visibility
+
+    static var alwaysShowNotch: Bool {
+        get { defaults.bool(forKey: Keys.alwaysShowNotch) }
+        set { defaults.set(newValue, forKey: Keys.alwaysShowNotch) }
     }
 
     // MARK: - Migration

@@ -42,6 +42,17 @@ struct NotchGeometry: Sendable {
         notchScreenRect.insetBy(dx: -10, dy: -5).contains(point)
     }
 
+    /// Check if a point is in the expanded closed-activity area (wider than physical notch)
+    func isPointInClosedActivity(_ point: CGPoint, closedWidth: CGFloat) -> Bool {
+        let expandedRect = CGRect(
+            x: screenRect.midX - closedWidth / 2,
+            y: screenRect.maxY - deviceNotchRect.height,
+            width: closedWidth,
+            height: deviceNotchRect.height
+        )
+        return expandedRect.insetBy(dx: -10, dy: -5).contains(point)
+    }
+
     /// Check if a point is in the opened panel area (fallback when real frame not available)
     func isPointInOpenedPanel(_ point: CGPoint, size: CGSize) -> Bool {
         openedScreenRect(for: size).insetBy(dx: -10, dy: -10).contains(point)

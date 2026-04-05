@@ -26,27 +26,51 @@ enum NotchOpenReason {
 enum NotchContentType: Equatable {
     case instances
     case menu
-    case chat(SessionState)
-    case question(SessionState)
+    case chat(String)      // sessionId only
+    case question(String)  // sessionId only
 
     var id: String {
         switch self {
         case .instances: return "instances"
         case .menu: return "menu"
-        case .chat(let session): return "chat-\(session.sessionId)"
-        case .question(let session): return "question-\(session.sessionId)"
+        case .chat(let sessionId): return "chat-\(sessionId)"
+        case .question(let sessionId): return "question-\(sessionId)"
         }
     }
 }
 
 @MainActor
 class NotchViewModel: ObservableObject {
+    private enum OpenedPageLayout {
+        static let pageIndicatorHeight: CGFloat = 18
+        static let pageIndicatorSpacing: CGFloat = 8
+    }
+
+    private enum HoverBehavior {
+        static let closeDelay: TimeInterval = 0.18
+        static let openedHitPaddingX: CGFloat = 10
+        static let openedHitPaddingY: CGFloat = 10
+        static let menuHitPaddingY: CGFloat = 40
+        static let menuShrinkDelay: TimeInterval = 0.18
+        static let contentSwitchCloseGrace: TimeInterval = 0.35
+    }
+
+    private enum MenuLayout {
+        static let fallbackHeight: CGFloat = 600
+        static let chromeHeight: CGFloat = 52
+    }
+
     // MARK: - Published State
 
     @Published var status: NotchStatus = .closed
     @Published var openReason: NotchOpenReason = .unknown
     @Published var contentType: NotchContentType = .instances
     @Published var isHovering: Bool = false
+    @Published private(set) var measuredMenuContentHeight: CGFloat = 0
+    @Published private(set) var measuredInstancesContentHeight: CGFloat = 0
+
+    /// The current total width of the closed notch (set by NotchView when showing activity)
+    @Published var closedActivityWidth: CGFloat = 0
 
     /// Actual rendered panel frame in screen coordinates (set by GeometryReader in NotchView)
     var panelScreenFrame: CGRect = .zero
@@ -68,7 +92,7 @@ class NotchViewModel: ObservableObject {
 
     /// Dynamic opened size based on content type
     private var panelWidth: CGFloat {
-        min(screenRect.width * 0.5, 640)
+        min(screenRect.width * 0.53, 680)
     }
 
     var openedSize: CGSize {
@@ -78,9 +102,9 @@ class NotchViewModel: ObservableObject {
         case .question:
             return CGSize(width: panelWidth, height: 380)
         case .menu:
-            return CGSize(width: panelWidth, height: 420 + screenSelector.expandedPickerHeight + soundSelector.totalSoundSectionHeight)
+            return CGSize(width: panelWidth, height: menuHeight)
         case .instances:
-            return CGSize(width: panelWidth, height: 320)
+            return CGSize(width: panelWidth, height: instancesHeight)
         }
     }
 
@@ -95,6 +119,34 @@ class NotchViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let events = EventMonitors.shared
     private var hoverTimer: DispatchWorkItem?
+    private var menuHeightWorkItem: DispatchWorkItem?
+    private var hoverCloseSuppressedUntil: Date = .distantPast
+    private var ignoresVerticalHoverBoundsUntilNextClick = false
+
+    private var menuHeight: CGFloat {
+        let maxHeight: CGFloat = windowHeight - 20
+        let chromeHeight = max(24, deviceNotchRect.height) + 12
+        let baseHeight = MenuLayout.fallbackHeight + screenSelector.expandedPickerHeight + soundSelector.expandedPickerHeight
+        let measuredHeight = measuredMenuContentHeight + chromeHeight + pageIndicatorChromeHeight
+        let targetHeight = max(baseHeight, measuredHeight)
+        return min(maxHeight, targetHeight)
+    }
+
+    private var instancesHeight: CGFloat {
+        let minHeight: CGFloat = 120
+        let maxHeight: CGFloat = 360
+        let chromeHeight = max(24, deviceNotchRect.height) + 12
+        guard measuredInstancesContentHeight > 0 else { return maxHeight }
+        return min(maxHeight, max(minHeight, measuredInstancesContentHeight + chromeHeight + pageIndicatorChromeHeight))
+    }
+
+    var openedHoverHitPaddingY: CGFloat {
+        contentType == .menu ? HoverBehavior.menuHitPaddingY : HoverBehavior.openedHitPaddingY
+    }
+
+    private var pageIndicatorChromeHeight: CGFloat {
+        OpenedPageLayout.pageIndicatorHeight + OpenedPageLayout.pageIndicatorSpacing
+    }
 
     // MARK: - Initialization
 
@@ -148,17 +200,44 @@ class NotchViewModel: ObservableObject {
         return false
     }
 
-    /// The chat session we're viewing (persists across close/open)
-    private var currentChatSession: SessionState?
+    /// The chat session ID we're viewing (persists across close/open)
+    private var currentChatSessionId: String?
 
     private func handleMouseMove(_ location: CGPoint) {
-        let inNotch = geometry.isPointInNotch(location)
-        // Use the actual rendered panel frame if available, otherwise fall back to calculated rect
+        // When closed notch is expanded (activity visible), use the wider hit area
+        let inNotch: Bool
+        if closedActivityWidth > 0 && status != .opened {
+            inNotch = geometry.isPointInClosedActivity(location, closedWidth: closedActivityWidth)
+        } else {
+            inNotch = geometry.isPointInNotch(location)
+        }
+        // Use the actual rendered panel frame for hit testing
         let inOpened: Bool
         if status == .opened && panelScreenFrame != .zero {
-            inOpened = panelScreenFrame.contains(location)
+            let expandedFrame = panelScreenFrame.insetBy(
+                dx: -HoverBehavior.openedHitPaddingX,
+                dy: -openedHoverHitPaddingY
+            )
+            if ignoresVerticalHoverBoundsUntilNextClick {
+                // If cursor has entered the real panel bounds, drop the grace and
+                // resume normal hover gating from now on.
+                if expandedFrame.contains(location) {
+                    ignoresVerticalHoverBoundsUntilNextClick = false
+                    inOpened = true
+                } else {
+                    let horizontalFrame = CGRect(
+                        x: expandedFrame.minX,
+                        y: screenRect.minY - windowHeight,
+                        width: expandedFrame.width,
+                        height: windowHeight * 3
+                    )
+                    inOpened = horizontalFrame.contains(location)
+                }
+            } else {
+                inOpened = expandedFrame.contains(location)
+            }
         } else {
-            inOpened = status == .opened && geometry.isPointInOpenedPanel(location, size: openedSize)
+            inOpened = false
         }
 
         let newHovering = inNotch || inOpened
@@ -178,9 +257,17 @@ class NotchViewModel: ObservableObject {
                 notchOpen(reason: .hover)
             }
         } else {
-            // Auto-close when mouse leaves (only for hover-opened, not click-opened)
+            // Auto-close when mouse leaves (only for hover-opened, not click-opened).
+            // Use a short delay so small hit-test gaps while moving inside the menu
+            // don't close the panel before the cursor reaches lower rows like Quit.
             if status == .opened && openReason == .hover {
-                notchClose()
+                guard Date() >= hoverCloseSuppressedUntil else { return }
+                let closeWorkItem = DispatchWorkItem { [weak self] in
+                    guard let self, !self.isHovering, self.status == .opened, self.openReason == .hover else { return }
+                    self.notchClose()
+                }
+                hoverTimer = closeWorkItem
+                DispatchQueue.main.asyncAfter(deadline: .now() + HoverBehavior.closeDelay, execute: closeWorkItem)
             }
         }
     }
@@ -190,16 +277,17 @@ class NotchViewModel: ObservableObject {
 
         switch status {
         case .opened:
-            if geometry.isPointOutsidePanel(location, size: openedSize) {
-                notchClose()
-                // Re-post the click so it reaches the window/app behind us
-                repostClickAt(location)
-            }
-            // Note: clicking inside the panel (including the notch header area) is handled
-            // by SwiftUI buttons. Do NOT close here — closing removes the window and causes
-            // the mouseUp event to leak to the app behind (e.g., Ghostty's tab bar).
+            // Global monitor only fires for clicks OUTSIDE our app. Any such click
+            // while the panel is open should close the panel.
+            notchClose()
         case .closed, .popping:
-            if geometry.isPointInNotch(location) {
+            let inNotchArea: Bool
+            if closedActivityWidth > 0 {
+                inNotchArea = geometry.isPointInClosedActivity(location, closedWidth: closedActivityWidth)
+            } else {
+                inNotchArea = geometry.isPointInNotch(location)
+            }
+            if inNotchArea {
                 notchOpen(reason: .click)
             }
         }
@@ -244,24 +332,53 @@ class NotchViewModel: ObservableObject {
 
         // Don't restore chat on notification - show instances list instead
         if reason == .notification {
-            currentChatSession = nil
+            currentChatSessionId = nil
             return
         }
 
         // Restore chat session if we had one open before
-        if let chatSession = currentChatSession {
-            // Avoid unnecessary updates if already showing this chat
-            if case .chat(let current) = contentType, current.sessionId == chatSession.sessionId {
+        if let sessionId = currentChatSessionId {
+            if case .chat(let id) = contentType, id == sessionId {
                 return
             }
-            contentType = .chat(chatSession)
+            contentType = .chat(sessionId)
         }
     }
 
+    func updateMeasuredMenuContentHeight(_ height: CGFloat) {
+        let clampedHeight = max(0, ceil(height))
+        guard clampedHeight > 0 else { return }
+
+        menuHeightWorkItem?.cancel()
+        menuHeightWorkItem = nil
+
+        if clampedHeight >= measuredMenuContentHeight {
+            measuredMenuContentHeight = clampedHeight
+            return
+        }
+
+        let shrinkWorkItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.measuredMenuContentHeight = clampedHeight
+        }
+        menuHeightWorkItem = shrinkWorkItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + HoverBehavior.menuShrinkDelay,
+            execute: shrinkWorkItem
+        )
+    }
+
+    func updateMeasuredInstancesContentHeight(_ height: CGFloat) {
+        let clampedHeight = max(0, ceil(height))
+        guard clampedHeight > 0 else { return }
+        measuredInstancesContentHeight = clampedHeight
+    }
+
+
     func notchClose() {
-        // Save chat session before closing if in chat mode
-        if case .chat(let session) = contentType {
-            currentChatSession = session
+        // Save chat session ID before closing if in chat mode
+        if case .chat(let sessionId) = contentType {
+            currentChatSessionId = sessionId
         }
         status = .closed
         contentType = .instances
@@ -278,29 +395,49 @@ class NotchViewModel: ObservableObject {
     }
 
     func toggleMenu() {
+        suppressHoverCloseAfterContentSwitch()
         contentType = contentType == .menu ? .instances : .menu
     }
 
+    func showMenu() {
+        suppressHoverCloseAfterContentSwitch()
+        contentType = .menu
+    }
+
+    func showInstances() {
+        if contentType == .menu {
+            ignoresVerticalHoverBoundsUntilNextClick = true
+        }
+        suppressHoverCloseAfterContentSwitch()
+        contentType = .instances
+    }
+
     func showChat(for session: SessionState) {
-        // Avoid unnecessary updates if already showing this chat
-        if case .chat(let current) = contentType, current.sessionId == session.sessionId {
+        if case .chat(let id) = contentType, id == session.sessionId {
             return
         }
-        contentType = .chat(session)
+        currentChatSessionId = session.sessionId
+        contentType = .chat(session.sessionId)
     }
 
     /// Show question panel for a session
     func showQuestion(for session: SessionState) {
-        if case .question(let current) = contentType, current.sessionId == session.sessionId {
+        if case .question(let id) = contentType, id == session.sessionId {
             return
         }
-        contentType = .question(session)
+        contentType = .question(session.sessionId)
     }
 
     /// Go back to instances list and clear saved chat state
     func exitChat() {
-        currentChatSession = nil
+        currentChatSessionId = nil
         contentType = .instances
+    }
+
+    private func suppressHoverCloseAfterContentSwitch() {
+        hoverTimer?.cancel()
+        hoverTimer = nil
+        hoverCloseSuppressedUntil = Date().addingTimeInterval(HoverBehavior.contentSwitchCloseGrace)
     }
 
     /// Perform boot animation: expand briefly then collapse

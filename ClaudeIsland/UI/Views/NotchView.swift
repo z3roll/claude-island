@@ -21,6 +21,7 @@ struct NotchView: View {
     @StateObject private var activityCoordinator = NotchActivityCoordinator.shared
     @StateObject private var companionService = CompanionService.shared
     @ObservedObject private var updateManager = UpdateManager.shared
+    @ObservedObject private var screenSelector = ScreenSelector.shared
     private let soundSelector = SoundSelector.shared
     @State private var previousPendingIds: Set<String> = []
     @State private var previousWaitingForInputIds: Set<String> = []
@@ -30,6 +31,8 @@ struct NotchView: View {
     @State private var isVisible: Bool = false
     @State private var isHovering: Bool = false
     @State private var isBouncing: Bool = false
+    @State private var isWiggling: Bool = false
+    @State private var wiggleAngle: Double = 0
     @State private var notificationSuppressedUntil: Date = Date()  // Suppress notifications during context resume
 
     @Namespace private var activityNamespace
@@ -49,10 +52,15 @@ struct NotchView: View {
         sessionMonitor.instances.contains { $0.phase.isWaitingForAnswer }
     }
 
+    /// Whether any waiting-for-input session was interrupted (ESC) rather than completing normally
+    private var hasInterruptedSession: Bool {
+        sessionMonitor.instances.contains { $0.phase == .waitingForInput && $0.wasInterrupted }
+    }
+
     /// Whether any Claude session is waiting for user input (done/ready state) within the display window
     private var hasWaitingForInput: Bool {
         let now = Date()
-        let displayDuration: TimeInterval = 30  // Show checkmark for 30 seconds
+        let displayDuration: TimeInterval = 3  // Show checkmark/X for 3 seconds
 
         return sessionMonitor.instances.contains { session in
             guard session.phase == .waitingForInput else { return false }
@@ -69,34 +77,35 @@ struct NotchView: View {
     private var closedNotchSize: CGSize {
         CGSize(
             width: viewModel.deviceNotchRect.width,
-            height: viewModel.deviceNotchRect.height
+            height: viewModel.deviceNotchRect.height + 2
         )
     }
 
     /// Extra width for expanding activities (like Dynamic Island)
     private var expansionWidth: CGFloat {
-        // Permission/question indicator adds width on left side only
         let indicatorWidth: CGFloat = (hasPendingPermission || hasPendingQuestion) ? 18 : 0
+        let baseWidth = 1.5 * max(0, closedNotchSize.height - 12)
 
-        // Expand for processing activity
         if activityCoordinator.expandingActivity.show {
             switch activityCoordinator.expandingActivity.type {
             case .claude:
-                let baseWidth = 2 * max(0, closedNotchSize.height - 12) + 20
                 return baseWidth + indicatorWidth
             case .none:
                 break
             }
         }
 
-        // Expand for pending permissions/questions (left indicator) or waiting for input (checkmark on right)
         if hasPendingPermission || hasPendingQuestion {
-            return 2 * max(0, closedNotchSize.height - 12) + 20 + indicatorWidth
+            return baseWidth + indicatorWidth
         }
 
-        // Waiting for input just shows checkmark on right, no extra left indicator
         if hasWaitingForInput {
-            return 2 * max(0, closedNotchSize.height - 12) + 20
+            return baseWidth
+        }
+
+        // Always-show notch without session activity: same width as processing
+        if AppSettings.alwaysShowNotch {
+            return baseWidth
         }
 
         return 0
@@ -172,8 +181,8 @@ struct NotchView: View {
                         radius: 6
                     )
                     .frame(
-                        maxWidth: viewModel.status == .opened ? notchSize.width : nil,
-                        maxHeight: viewModel.status == .opened ? notchSize.height : nil,
+                        width: viewModel.status == .opened ? notchSize.width : nil,
+                        height: viewModel.status == .opened ? notchSize.height : nil,
                         alignment: .top
                     )
                     .animation(viewModel.status == .opened ? openAnimation : closeAnimation, value: viewModel.status)
@@ -184,22 +193,14 @@ struct NotchView: View {
                     .animation(.smooth, value: hasWaitingForInput)
                     .animation(.spring(response: 0.3, dampingFraction: 0.5), value: isBouncing)
                     .contentShape(Rectangle())
-                    .background(
-                        GeometryReader { geo in
-                            Color.clear.onAppear {
-                                updatePanelFrame(geo)
-                            }
-                            .onChange(of: viewModel.status) { _, _ in
-                                updatePanelFrame(geo)
-                            }
-                            .onChange(of: viewModel.contentType) { _, _ in
-                                updatePanelFrame(geo)
-                            }
-                        }
-                    )
+                    .background(panelFrameTracker)
                     .onHover { hovering in
                         withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) {
                             isHovering = hovering
+                        }
+                        // Trigger crab wiggle on hover enter when closed
+                        if hovering && viewModel.status != .opened && showClosedActivity {
+                            triggerWiggle()
                         }
                     }
                     .onTapGesture {
@@ -221,6 +222,7 @@ struct NotchView: View {
         }
         .onChange(of: viewModel.status) { oldStatus, newStatus in
             handleStatusChange(from: oldStatus, to: newStatus)
+            updateClosedActivityWidth()
         }
         .onChange(of: sessionMonitor.pendingInstances) { _, sessions in
             handlePendingSessionsChange(sessions)
@@ -230,6 +232,34 @@ struct NotchView: View {
             handleWaitingForInputChange(instances)
             handleQuestionChange(instances)
             handleSessionEndedChange(instances)
+            updateClosedActivityWidth()
+        }
+        .onChange(of: activityCoordinator.expandingActivity) { _, _ in
+            updateClosedActivityWidth()
+        }
+    }
+
+    private var panelFrameTracker: some View {
+        GeometryReader { geo in
+            Color.clear
+                .onAppear {
+                    updatePanelFrame(geo)
+                }
+                .onChange(of: viewModel.status) { _, _ in
+                    updatePanelFrame(geo)
+                }
+                .onChange(of: viewModel.contentType) { _, _ in
+                    schedulePanelFrameUpdate(geo)
+                }
+                .onChange(of: screenSelector.isPickerExpanded) { _, _ in
+                    schedulePanelFrameUpdate(geo)
+                }
+                .onChange(of: soundSelector.expandedEventType) { _, _ in
+                    schedulePanelFrameUpdate(geo)
+                }
+                .onChange(of: soundSelector.customSounds.count) { _, _ in
+                    schedulePanelFrameUpdate(geo)
+                }
         }
     }
 
@@ -241,7 +271,7 @@ struct NotchView: View {
 
     /// Whether to show the expanded closed state (processing, pending permission/question, or waiting for input)
     private var showClosedActivity: Bool {
-        isProcessing || hasPendingPermission || hasPendingQuestion || hasWaitingForInput
+        isProcessing || hasPendingPermission || hasPendingQuestion || hasWaitingForInput || AppSettings.alwaysShowNotch
     }
 
     @ViewBuilder
@@ -255,6 +285,8 @@ struct NotchView: View {
             if viewModel.status == .opened {
                 contentView
                     .frame(width: notchSize.width - 24) // Fixed width to prevent reflow
+                    .frame(maxHeight: .infinity)
+                    .clipped()
                     .transition(
                         .asymmetric(
                             insertion: .scale(scale: 0.8, anchor: .top)
@@ -265,6 +297,13 @@ struct NotchView: View {
                                 .animation(.easeIn(duration: 0.2))
                         )
                     )
+
+                if showsPageIndicator {
+                    pageIndicator
+                        .frame(width: notchSize.width - 24)
+                        .padding(.bottom, 2)
+                        .transition(.opacity.animation(.smooth(duration: 0.2)))
+                }
             }
         }
     }
@@ -277,7 +316,17 @@ struct NotchView: View {
             // Left side - crab + optional permission indicator (visible when processing, pending, or waiting for input)
             if showClosedActivity {
                 HStack(spacing: 4) {
-                    ClaudeCrabIcon(size: 14, animateLegs: isProcessing)
+                    ClaudeCrabIcon(
+                        size: 14,
+                        animateLegs: isProcessing,
+                        pacing: viewModel.status != .opened
+                            && !isProcessing
+                            && !hasPendingPermission
+                            && !hasPendingQuestion
+                            && !hasWaitingForInput,
+                        maxPacingOffset: sideWidth + closedNotchSize.width
+                    )
+                        .rotationEffect(.degrees(viewModel.status != .opened ? wiggleAngle : 0))
                         .matchedGeometryEffect(id: "crab", in: activityNamespace, isSource: showClosedActivity)
 
                     // Permission/question indicator (amber) - waiting for input shows checkmark on right
@@ -313,23 +362,31 @@ struct NotchView: View {
             }
 
             // Right side - spinner when processing/pending, question mark for questions, checkmark when waiting for input
-            if showClosedActivity {
+            if showClosedActivity && viewModel.status != .opened {
                 if isProcessing || hasPendingPermission {
                     ProcessingSpinner()
                         .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: showClosedActivity)
-                        .frame(width: viewModel.status == .opened ? 20 : sideWidth)
+                        .frame(width: sideWidth)
                 } else if hasPendingQuestion {
-                    // Pulsing question mark for pending questions
                     Text("?")
                         .font(.system(size: 12, weight: .bold))
                         .foregroundColor(TerminalColors.amber)
                         .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: showClosedActivity)
-                        .frame(width: viewModel.status == .opened ? 20 : sideWidth)
+                        .frame(width: sideWidth)
                 } else if hasWaitingForInput {
-                    // Checkmark for waiting-for-input on the right side
-                    ReadyForInputIndicatorIcon(size: 14, color: TerminalColors.green)
-                        .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: showClosedActivity)
-                        .frame(width: viewModel.status == .opened ? 20 : sideWidth)
+                    if hasInterruptedSession {
+                        InterruptedIndicatorIcon(size: 14)
+                            .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: showClosedActivity)
+                            .frame(width: sideWidth)
+                    } else {
+                        ReadyForInputIndicatorIcon(size: 14, color: TerminalColors.green)
+                            .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: showClosedActivity)
+                            .frame(width: sideWidth)
+                    }
+                } else {
+                    // Invisible spacer to keep the same width as working state
+                    Color.clear
+                        .frame(width: sideWidth)
                 }
             }
 
@@ -338,7 +395,11 @@ struct NotchView: View {
     }
 
     private var sideWidth: CGFloat {
-        max(0, closedNotchSize.height - 12) + 10
+        max(0, closedNotchSize.height - 12) + 2
+    }
+
+    private var showsPageIndicator: Bool {
+        viewModel.contentType == .instances || viewModel.contentType == .menu
     }
 
     // MARK: - Opened Header Content
@@ -359,33 +420,6 @@ struct NotchView: View {
                 .padding(.leading, showClosedActivity ? 8 : 0)
 
             Spacer()
-
-            // Menu toggle
-            Button {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    viewModel.toggleMenu()
-                    if viewModel.contentType == .menu {
-                        updateManager.markUpdateSeen()
-                    }
-                }
-            } label: {
-                ZStack(alignment: .topTrailing) {
-                    Image(systemName: viewModel.contentType == .menu ? "xmark" : "line.3.horizontal")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.4))
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
-
-                    // Green dot for unseen update
-                    if updateManager.hasUnseenUpdate && viewModel.contentType != .menu {
-                        Circle()
-                            .fill(TerminalColors.green)
-                            .frame(width: 6, height: 6)
-                            .offset(x: -2, y: 2)
-                    }
-                }
-            }
-            .buttonStyle(.plain)
         }
     }
 
@@ -393,46 +427,80 @@ struct NotchView: View {
 
     @ViewBuilder
     private var contentView: some View {
-        Group {
-            switch viewModel.contentType {
-            case .instances:
-                ClaudeInstancesView(
-                    sessionMonitor: sessionMonitor,
-                    viewModel: viewModel
-                )
-            case .menu:
-                NotchMenuView(viewModel: viewModel)
-            case .chat(let session):
+        mainContent
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .frame(width: notchSize.width - 24) // Fixed width to prevent text reflow
+        // Removed .id() - was causing view recreation and performance issues
+    }
+
+    @ViewBuilder
+    private var mainContent: some View {
+        switch viewModel.contentType {
+        case .instances:
+            ClaudeInstancesView(
+                sessionMonitor: sessionMonitor,
+                viewModel: viewModel
+            )
+        case .menu:
+            NotchMenuView(viewModel: viewModel)
+        case .chat(let sessionId):
+            if let session = sessionMonitor.instances.first(where: { $0.sessionId == sessionId }) {
                 ChatView(
-                    sessionId: session.sessionId,
+                    sessionId: sessionId,
                     initialSession: session,
                     sessionMonitor: sessionMonitor,
                     viewModel: viewModel
                 )
-            case .question(let session):
-                if let ctx = session.activeQuestion {
-                    QuestionView(
-                        question: ctx,
-                        onAnswer: { answers in
-                            sessionMonitor.answerQuestion(
-                                sessionId: session.sessionId,
-                                answers: answers
-                            )
-                            // Return to instances list after answering
-                            viewModel.exitChat()
-                        }
-                    )
-                } else {
-                    // Question was answered externally, show instances
-                    ClaudeInstancesView(
-                        sessionMonitor: sessionMonitor,
-                        viewModel: viewModel
-                    )
-                }
+            } else {
+                ClaudeInstancesView(
+                    sessionMonitor: sessionMonitor,
+                    viewModel: viewModel
+                )
+            }
+        case .question(let sessionId):
+            if let session = sessionMonitor.instances.first(where: { $0.sessionId == sessionId }),
+               let ctx = session.activeQuestion {
+                QuestionView(
+                    question: ctx,
+                    onAnswer: { answers in
+                        sessionMonitor.answerQuestion(
+                            sessionId: sessionId,
+                            answers: answers
+                        )
+                        viewModel.exitChat()
+                    }
+                )
+            } else {
+                ClaudeInstancesView(
+                    sessionMonitor: sessionMonitor,
+                    viewModel: viewModel
+                )
             }
         }
-        .frame(width: notchSize.width - 24) // Fixed width to prevent text reflow
-        // Removed .id() - was causing view recreation and performance issues
+    }
+
+    private var pageIndicator: some View {
+        HStack(spacing: 2) {
+            pageIndicatorDot(
+                isActive: viewModel.contentType == .instances,
+                action: { viewModel.showInstances() }
+            )
+            pageIndicatorDot(
+                isActive: viewModel.contentType == .menu,
+                action: {
+                    viewModel.showMenu()
+                    updateManager.markUpdateSeen()
+                }
+            )
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 20)
+        .contentShape(Rectangle())
+        .zIndex(20)
+    }
+
+    private func pageIndicatorDot(isActive: Bool, action: @escaping () -> Void) -> some View {
+        PageIndicatorDot(isActive: isActive, action: action)
     }
 
     // MARK: - Event Handlers
@@ -460,6 +528,12 @@ struct NotchView: View {
             // Hide activity when done
             activityCoordinator.hideActivity()
 
+            // Keep visible if alwaysShowNotch is enabled
+            if AppSettings.alwaysShowNotch {
+                isVisible = true
+                return
+            }
+
             // Delay hiding the notch until animation completes
             // Don't hide on non-notched devices - users need a visible target
             if viewModel.status == .closed && viewModel.hasPhysicalNotch {
@@ -473,11 +547,9 @@ struct NotchView: View {
     }
 
     private func updatePanelFrame(_ geo: GeometryProxy) {
-        // Convert the panel's local frame to screen coordinates
         let localFrame = geo.frame(in: .global)
         guard let screen = NSScreen.main else { return }
         let screenHeight = screen.frame.height
-        // SwiftUI global coordinates have Y=0 at top, NSScreen has Y=0 at bottom
         let screenFrame = CGRect(
             x: localFrame.origin.x,
             y: screenHeight - localFrame.origin.y - localFrame.height,
@@ -485,6 +557,38 @@ struct NotchView: View {
             height: localFrame.height
         )
         viewModel.panelScreenFrame = screenFrame
+    }
+
+    private func schedulePanelFrameUpdate(_ geo: GeometryProxy) {
+        DispatchQueue.main.async {
+            updatePanelFrame(geo)
+        }
+    }
+
+    /// Trigger a short wiggle/shake animation on the crab icon
+    private func triggerWiggle() {
+        guard !isWiggling else { return }
+        isWiggling = true
+        // Sequence: 0 -> -5 -> 5 -> -3 -> 3 -> 0
+        let steps: [(Double, Double)] = [(-5, 0.06), (5, 0.06), (-3, 0.05), (3, 0.05), (0, 0.05)]
+        var delay: Double = 0
+        for (angle, duration) in steps {
+            delay += duration
+            let capturedDelay = delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + capturedDelay) {
+                withAnimation(.easeInOut(duration: duration)) {
+                    wiggleAngle = angle
+                }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay + 0.1) {
+            isWiggling = false
+        }
+    }
+
+    /// Keep the ViewModel's closedActivityWidth in sync so hover hit-testing covers the expanded area
+    private func updateClosedActivityWidth() {
+        viewModel.closedActivityWidth = showClosedActivity ? closedContentWidth : 0
     }
 
     private func handleStatusChange(from oldStatus: NotchStatus, to newStatus: NotchStatus) {
@@ -499,7 +603,7 @@ struct NotchView: View {
             // Don't hide on non-notched devices - users need a visible target
             guard viewModel.hasPhysicalNotch else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                if viewModel.status == .closed && !isAnyProcessing && !hasPendingPermission && !hasPendingQuestion && !hasWaitingForInput && !activityCoordinator.expandingActivity.show {
+                if viewModel.status == .closed && !isAnyProcessing && !hasPendingPermission && !hasPendingQuestion && !hasWaitingForInput && !activityCoordinator.expandingActivity.show && !AppSettings.alwaysShowNotch {
                     isVisible = false
                 }
             }
@@ -595,8 +699,8 @@ struct NotchView: View {
                 }
             }
 
-            // Schedule hiding the checkmark after 30 seconds
-            DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [self] in
+            // Schedule hiding the indicator after 3 seconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [self] in
                 // Trigger a UI update to re-evaluate hasWaitingForInput
                 handleProcessingChange()
             }
@@ -675,5 +779,51 @@ struct NotchView: View {
         }
 
         previousEndedIds = currentIds
+    }
+}
+
+private struct PageIndicatorDot: View {
+    let isActive: Bool
+    let action: () -> Void
+
+    @State private var isHovered = false
+    private let hitWidth: CGFloat = 16
+    private let hitHeight: CGFloat = 20
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Capsule()
+                    .fill(Color.white.opacity(isHovered ? 0.08 : 0))
+                    .frame(width: hitWidth, height: hitHeight)
+
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: dotSize, height: dotSize)
+                    .scaleEffect(isHovered ? 1.12 : 1)
+            }
+            .frame(width: hitWidth, height: hitHeight)
+            .contentShape(Rectangle())
+            .animation(.spring(response: 0.22, dampingFraction: 0.82), value: isActive)
+            .animation(.spring(response: 0.18, dampingFraction: 0.8), value: isHovered)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            isHovered = hovering
+        }
+    }
+
+    private var dotColor: Color {
+        if isActive {
+            return Color.white.opacity(isHovered ? 1 : 0.92)
+        }
+        return Color.white.opacity(isHovered ? 0.36 : 0.2)
+    }
+
+    private var dotSize: CGFloat {
+        if isActive {
+            return isHovered ? 8 : 7
+        }
+        return isHovered ? 7 : 6
     }
 }
