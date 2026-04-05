@@ -11,6 +11,14 @@ import SwiftUI
 import ServiceManagement
 import Sparkle
 
+private struct MenuContentHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 // MARK: - NotchMenuView
 
 struct NotchMenuView: View {
@@ -20,21 +28,34 @@ struct NotchMenuView: View {
     @ObservedObject private var soundSelector = SoundSelector.shared
     @State private var hooksInstalled: Bool = false
     @State private var launchAtLogin: Bool = false
+    @State private var alwaysShowNotch: Bool = AppSettings.alwaysShowNotch
 
     var body: some View {
-        VStack(spacing: 4) {
-            // Back button
-            MenuRow(
-                icon: "chevron.left",
-                label: "Back"
-            ) {
-                viewModel.toggleMenu()
+        ScrollView(.vertical, showsIndicators: false) {
+            measuredContent
+                .padding(.horizontal, 8)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .top)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .onAppear {
+            refreshStates()
+        }
+        .onPreferenceChange(MenuContentHeightPreferenceKey.self) { height in
+            viewModel.updateMeasuredMenuContentHeight(height)
+        }
+        .onChange(of: viewModel.contentType) { _, newValue in
+            if newValue == .menu {
+                refreshStates()
             }
+        }
+        .swipeBack {
+            viewModel.toggleMenu()
+        }
+    }
 
-            Divider()
-                .background(Color.white.opacity(0.08))
-                .padding(.vertical, 4)
-
+    private var measuredContent: some View {
+        VStack(spacing: 4) {
             // Appearance settings
             ScreenPickerRow(screenSelector: screenSelector)
 
@@ -76,10 +97,21 @@ struct NotchMenuView: View {
                 if hooksInstalled {
                     HookInstaller.uninstall()
                     hooksInstalled = false
+                    NotificationCenter.default.post(name: .claudeIslandHooksUninstalled, object: nil)
                 } else {
                     HookInstaller.installIfNeeded()
                     hooksInstalled = true
+                    NotificationCenter.default.post(name: .claudeIslandHooksInstalled, object: nil)
                 }
+            }
+
+            MenuToggleRow(
+                icon: "eye",
+                label: "Always Show Notch",
+                isOn: alwaysShowNotch
+            ) {
+                alwaysShowNotch.toggle()
+                AppSettings.alwaysShowNotch = alwaysShowNotch
             }
 
             AccessibilityRow(isEnabled: AXIsProcessTrusted())
@@ -95,7 +127,7 @@ struct NotchMenuView: View {
                 icon: "star",
                 label: "Star on GitHub"
             ) {
-                if let url = URL(string: "https://github.com/farouqaldori/claude-island") {
+                if let url = URL(string: "https://github.com/z3roll/claude-island") {
                     NSWorkspace.shared.open(url)
                 }
             }
@@ -112,17 +144,14 @@ struct NotchMenuView: View {
                 NSApplication.shared.terminate(nil)
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .onAppear {
-            refreshStates()
-        }
-        .onChange(of: viewModel.contentType) { _, newValue in
-            if newValue == .menu {
-                refreshStates()
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: MenuContentHeightPreferenceKey.self,
+                    value: proxy.size.height
+                )
             }
-        }
+        )
     }
 
     private func refreshStates() {
@@ -179,6 +208,7 @@ struct UpdateRow: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
+            .contentShape(Rectangle())
             .background(
                 RoundedRectangle(cornerRadius: 8)
                     .fill(isHovered && isInteractive ? Color.white.opacity(0.08) : Color.clear)
@@ -423,6 +453,7 @@ struct AccessibilityRow: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+        .contentShape(Rectangle())
         .background(
             RoundedRectangle(cornerRadius: 8)
                 .fill(isHovered ? Color.white.opacity(0.08) : Color.clear)
@@ -468,6 +499,7 @@ struct MenuRow: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
+            .contentShape(Rectangle())
             .background(
                 RoundedRectangle(cornerRadius: 8)
                     .fill(isHovered ? Color.white.opacity(0.08) : Color.clear)
@@ -517,6 +549,7 @@ struct MenuToggleRow: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
+            .contentShape(Rectangle())
             .background(
                 RoundedRectangle(cornerRadius: 8)
                     .fill(isHovered ? Color.white.opacity(0.08) : Color.clear)

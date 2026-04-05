@@ -12,11 +12,24 @@ struct ClaudeInstancesView: View {
     @ObservedObject var sessionMonitor: ClaudeSessionMonitor
     @ObservedObject var viewModel: NotchViewModel
 
+    private let rowHeightEstimate: CGFloat = 58
+    private let rowSpacing: CGFloat = 2
+    private let listVerticalPadding: CGFloat = 8
+
     var body: some View {
         if sessionMonitor.instances.isEmpty {
             emptyState
         } else {
             instancesList
+                .onAppear(perform: updateEstimatedHeight)
+                .onChange(of: sessionMonitor.instances) { _, _ in
+                    updateEstimatedHeight()
+                }
+                .swipeForward {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                        viewModel.showMenu()
+                    }
+                }
         }
     }
 
@@ -37,54 +50,57 @@ struct ClaudeInstancesView: View {
 
     // MARK: - Instances List
 
-    /// Priority: active (approval/processing/compacting) > waitingForInput > idle
-    /// Secondary sort: by last user message date (stable - doesn't change when agent responds)
-    /// Note: approval requests stay in their date-based position to avoid layout shift
+    /// Sort by session start time (oldest first, newest at bottom).
+    /// Sessions awaiting user permission are floated to the top until they
+    /// are approved/denied.
     private var sortedInstances: [SessionState] {
         sessionMonitor.instances.sorted { a, b in
-            let priorityA = phasePriority(a.phase)
-            let priorityB = phasePriority(b.phase)
-            if priorityA != priorityB {
-                return priorityA < priorityB
+            let aNeedsAction = a.activePermission != nil
+            let bNeedsAction = b.activePermission != nil
+            if aNeedsAction != bNeedsAction {
+                return aNeedsAction && !bNeedsAction
             }
-            // Sort by last user message date (more recent first)
-            // Fall back to lastActivity if no user messages yet
-            let dateA = a.lastUserMessageDate ?? a.lastActivity
-            let dateB = b.lastUserMessageDate ?? b.lastActivity
-            return dateA > dateB
+            return a.createdAt < b.createdAt
         }
     }
 
-    /// Lower number = higher priority
-    /// Approval/question requests share priority with processing to maintain stable ordering
-    private func phasePriority(_ phase: SessionPhase) -> Int {
-        switch phase {
-        case .waitingForApproval, .waitingForAnswer, .processing, .compacting: return 0
-        case .waitingForInput: return 1
-        case .idle, .ended: return 2
+    @ViewBuilder
+    private var rows: some View {
+        ForEach(sortedInstances) { session in
+            InstanceRow(
+                session: session,
+                onFocus: { focusSession(session) },
+                onChat: { openChat(session) },
+                onArchive: { archiveSession(session) },
+                onApprove: { approveSession(session) },
+                onReject: { rejectSession(session) },
+                onAnswer: { answers in answerQuestion(session, answers: answers) },
+                onOpenQuestion: { openQuestion(session) }
+            )
+            .id(session.stableId)
         }
     }
 
     private var instancesList: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            LazyVStack(spacing: 2) {
-                ForEach(sortedInstances) { session in
-                    InstanceRow(
-                        session: session,
-                        onFocus: { focusSession(session) },
-                        onChat: { openChat(session) },
-                        onArchive: { archiveSession(session) },
-                        onApprove: { approveSession(session) },
-                        onReject: { rejectSession(session) },
-                        onAnswer: { answers in answerQuestion(session, answers: answers) },
-                        onOpenQuestion: { openQuestion(session) }
-                    )
-                    .id(session.stableId)
-                }
-            }
-            .padding(.vertical, 4)
+            contentRows
         }
         .scrollBounceBehavior(.basedOnSize)
+    }
+
+    private var contentRows: some View {
+        VStack(spacing: 2) {
+            rows
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func updateEstimatedHeight() {
+        let count = CGFloat(sortedInstances.count)
+        let estimatedHeight = count * rowHeightEstimate
+            + max(0, count - 1) * rowSpacing
+            + listVerticalPadding
+        viewModel.updateMeasuredInstancesContentHeight(estimatedHeight)
     }
 
     // MARK: - Actions
@@ -107,6 +123,12 @@ struct ClaudeInstancesView: View {
 
     private func openChat(_ session: SessionState) {
         viewModel.showChat(for: session)
+        // Mark as read: transition waitingForInput → idle
+        if session.phase == .waitingForInput {
+            Task {
+                await SessionStore.shared.markAsRead(sessionId: session.sessionId)
+            }
+        }
     }
 
     private func approveSession(_ session: SessionState) {
@@ -205,7 +227,7 @@ struct InstanceRow: View {
         .padding(.trailing, 14)
         .padding(.vertical, 10)
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
+        .onTapGesture {
             onChat()
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isWaitingForApproval)
@@ -409,11 +431,6 @@ struct InstanceRow: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
             } else {
                 HStack(spacing: 8) {
-                    // Chat icon - always show
-                    IconButton(icon: "bubble.left") {
-                        onChat()
-                    }
-
                     // Terminal jump button (for any session with a resolved terminal)
                     if session.canJumpToTerminal {
                         IconButton(icon: session.terminalIconName) {

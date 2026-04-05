@@ -74,6 +74,7 @@ struct EventSoundRow: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
+                .contentShape(Rectangle())
                 .background(
                     RoundedRectangle(cornerRadius: 8)
                         .fill(isHovered ? Color.white.opacity(0.08) : Color.clear)
@@ -230,6 +231,7 @@ private struct SoundOptionRowInline: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
+        .contentShape(Rectangle())
         .background(
             RoundedRectangle(cornerRadius: 6)
                 .fill(isHovered ? Color.white.opacity(0.06) : Color.clear)
@@ -263,6 +265,7 @@ private struct ImportSoundButton: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
+            .contentShape(Rectangle())
             .background(
                 RoundedRectangle(cornerRadius: 6)
                     .fill(isHovered ? Color.white.opacity(0.06) : Color.clear)
