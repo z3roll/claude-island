@@ -85,11 +85,6 @@ class NotchWindowController: NSWindowController {
 
         // Start with ignoring mouse events (closed state)
         notchWindow.ignoresMouseEvents = true
-
-        // Perform boot animation after a brief delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.viewModel.performBootAnimation()
-        }
     }
 
     required init?(coder: NSCoder) {

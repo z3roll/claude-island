@@ -68,6 +68,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Mixpanel.mainInstance().flush()
 
         HookInstaller.installIfNeeded()
+        HookInstaller.ensureStatusLineSelfHeal()
         NSApplication.shared.setActivationPolicy(.accessory)
 
         windowManager = WindowManager()
@@ -80,7 +81,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if updater.canCheckForUpdates {
             updater.checkForUpdates()
         }
-
         updateCheckTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
             guard let updater = self?.updater, updater.canCheckForUpdates else { return }
             updater.checkForUpdates()
@@ -175,7 +175,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func ensureSingleInstance() -> Bool {
-        let bundleID = Bundle.main.bundleIdentifier ?? "com.farouqaldori.ClaudeIsland"
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.z3roll.ClaudeIsland"
         let runningApps = NSWorkspace.shared.runningApplications.filter {
             $0.bundleIdentifier == bundleID
         }

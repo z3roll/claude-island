@@ -72,10 +72,14 @@ class NotchPanel: NSPanel {
            event.type == .rightMouseDown || event.type == .rightMouseUp {
             // Get the location in window coordinates
             let locationInWindow = event.locationInWindow
+            NSLog("[sendEvent] type=%ld pt=(%.1f, %.1f) ignoresMouseEvents=%@",
+                  event.type.rawValue, locationInWindow.x, locationInWindow.y,
+                  ignoresMouseEvents ? "YES" : "NO")
 
             // Check if any view wants to handle this event
             if let contentView = self.contentView,
                contentView.hitTest(locationInWindow) == nil {
+                NSLog("[sendEvent] PASS-THROUGH triggered")
                 // No view wants this event - pass it through to windows behind
                 // by temporarily ignoring mouse events and re-posting
                 let screenLocation = convertPoint(toScreen: locationInWindow)
