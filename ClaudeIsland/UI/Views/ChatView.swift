@@ -140,43 +140,44 @@ struct ChatView: View {
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: isWaitingForApproval)
         .animation(nil, value: viewModel.status)
+        .task(id: session.cwd) {
+            // Keep git branch in sync by polling while the chat view is visible.
+            // Cancelled automatically when cwd changes or view disappears.
+            let cwd = session.cwd
+            let initial = await Self.getGitBranch(cwd: cwd)
+            if !Task.isCancelled { gitBranch = initial }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                if Task.isCancelled { break }
+                let next = await Self.getGitBranch(cwd: cwd)
+                if !Task.isCancelled, next != gitBranch { gitBranch = next }
+            }
+        }
         .task {
             // Pick spinner verb if already processing when chat opens
             if isProcessing && currentSpinnerVerb.isEmpty {
                 currentSpinnerVerb = ProcessingIndicatorView.randomVerb()
             }
 
-            // Load git branch in background (don't block UI)
-            Task { gitBranch = await Self.getGitBranch(cwd: session.cwd) }
+            // Git branch load + polling is handled in a separate .task(id: session.cwd)
 
-            // Skip if already loaded (prevents redundant work on view recreation)
-            guard !hasLoadedOnce else { return }
-            hasLoadedOnce = true
-
-            // Check if already loaded with content (from previous visit)
-            if ChatHistoryManager.shared.isLoaded(sessionId: sessionId) {
-                let cached = ChatHistoryManager.shared.history(for: sessionId)
-                if !cached.isEmpty {
-                    // Show initial items immediately, then load rest in background
-                    if history.isEmpty {
+            // Show cached items immediately (if any) for instant paint
+            if !hasLoadedOnce {
+                hasLoadedOnce = true
+                if ChatHistoryManager.shared.isLoaded(sessionId: sessionId) {
+                    let cached = ChatHistoryManager.shared.history(for: sessionId)
+                    if !cached.isEmpty, history.isEmpty {
                         let tail = Array(cached.suffix(Self.initialLoadSize))
                         history = tail
                         loadedItemCount = tail.count
                     }
-                    isLoading = false
-                    // Background load remaining history
-                    Task {
-                        try? await Task.sleep(nanoseconds: 100_000_000) // 100ms delay
-                        let full = ChatHistoryManager.shared.history(for: sessionId)
-                        history = full
-                        loadedItemCount = full.count
-                        hasMoreHistory = false
-                    }
-                    return
+                    if !cached.isEmpty { isLoading = false }
                 }
             }
 
-            // Load/sync from JSONL file
+            // ALWAYS re-sync from JSONL on view enter so newly arrived assistant
+            // messages / tool results from the live session show up even when
+            // hook-driven updates didn't reach us.
             await ChatHistoryManager.shared.syncFromFile(sessionId: sessionId, cwd: session.cwd)
             let full = ChatHistoryManager.shared.history(for: sessionId)
             history = full
@@ -243,9 +244,7 @@ struct ChatView: View {
                 // Check if permission was just accepted (transition from waitingForApproval to processing)
                 let wasWaiting = isWaitingForApproval
                 session = updated
-                if cwdChanged {
-                    Task { gitBranch = await Self.getGitBranch(cwd: updated.cwd) }
-                }
+                _ = cwdChanged  // handled by .task(id: session.cwd)
                 let isNowProcessing = updated.phase == .processing
 
                 // Pick a spinner verb if processing and no verb set yet
