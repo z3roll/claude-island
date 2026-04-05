@@ -88,15 +88,15 @@
 - Boot animation (notch briefly expanded on launch) removed.
 - Hooks on/off toggle remains but no longer clears old in-memory state
   aggressively; external tool interop is smoother.]]></description>
-            <pubDate>Mon, 06 Apr 2026 03:49:29 +0800</pubDate>
-            <sparkle:version>71</sparkle:version>
+            <pubDate>Mon, 06 Apr 2026 04:56:34 +0800</pubDate>
+            <sparkle:version>73</sparkle:version>
             <sparkle:shortVersionString>1.4</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure
                 url="https://github.com/z3roll/claude-island/releases/download/v1.4/ClaudeIsland-v1.4.zip"
                 type="application/octet-stream"
-                sparkle:edSignature="cHG6y4OIiQQinKQ3dO4NBVBQPJBTkQVUsfR7A1t/MLGJU+BVDmgOqT/j7LrL+gy2bvpbTdbVCTmfrEsqfocpDA=="
-                length="4036409"
+                sparkle:edSignature="ERnZ1CpELEQpzBYq766COFI7NZ9Am4OhCwSEpyzqRXDuJb/dgccdj2Rli9h1fmVS8TlRFyl4LjibsXGYR9C1CA=="
+                length="4009635"
             />
         </item>
     </channel>
