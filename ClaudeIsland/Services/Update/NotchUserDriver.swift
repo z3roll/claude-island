@@ -65,6 +65,7 @@ class UpdateManager: NSObject, ObservableObject {
 
     func downloadAndInstall() {
         installHandler?(.install)
+        installHandler = nil  // one-shot reply
     }
 
     func installAndRelaunch() {
