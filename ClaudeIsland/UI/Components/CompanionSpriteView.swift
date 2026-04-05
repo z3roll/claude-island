@@ -25,6 +25,10 @@ struct CompanionSpriteView: View {
                 }
             }
             .opacity(companion.shiny ? shimmerOpacity : 1.0)
+            .overlay(alignment: .topLeading) {
+                effectBadge
+                    .offset(x: -fontSize * effectOffsetMultiplier, y: 0)
+            }
             .onAppear {
                 if companion.shiny {
                     withAnimation(
@@ -35,6 +39,35 @@ struct CompanionSpriteView: View {
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var effectBadge: some View {
+        let text = companion.effect.display(phase: companion.effectPhase)
+        if !text.isEmpty {
+            Text(text)
+                .font(.system(size: fontSize * effectSizeMultiplier, weight: .medium, design: .monospaced))
+                .kerning(-1)
+                .foregroundColor(companion.rarity.color)
+                .fixedSize(horizontal: true, vertical: true)
+                .transition(.opacity.combined(with: .scale(scale: 0.7)))
+                .id(companion.effect) // re-transition when effect changes
+                .animation(.easeOut(duration: 0.15), value: companion.effectPhase)
+        }
+    }
+
+    private var effectSizeMultiplier: CGFloat {
+        switch companion.effect {
+        case .thinking: return 0.8
+        default: return 1.1
+        }
+    }
+
+    private var effectOffsetMultiplier: CGFloat {
+        switch companion.effect {
+        case .thinking: return 0.8
+        default: return 1.2
         }
     }
 

@@ -149,6 +149,36 @@ private let HAT_LINES: [CompanionHat: String] = [
     .tinyduck:  "    ,>      ",
 ]
 
+// MARK: - Effect
+
+enum CompanionEffect: Int {
+    case none = 0
+    case sleeping = 1
+    case typing = 2
+    case thinking = 3
+
+    /// Priority: higher wins when multiple sources set effects.
+    var priority: Int { rawValue }
+
+    var tickInterval: TimeInterval {
+        switch self {
+        case .typing:   return 0.4
+        case .sleeping: return 1.5
+        case .thinking: return 0.5
+        case .none:     return 1.0
+        }
+    }
+
+    func display(phase: Int) -> String {
+        switch self {
+        case .none:     return ""
+        case .typing:   return [".", "..", "..."][phase % 3]
+        case .sleeping: return ["z", "zZ", "zzZ"][phase % 3]
+        case .thinking: return ["?", "??", "???"][phase % 3]
+        }
+    }
+}
+
 // MARK: - CompanionService
 
 @MainActor
@@ -166,16 +196,100 @@ final class CompanionService: ObservableObject {
 
     @Published private(set) var currentFrameLines: [String] = []
 
+    // MARK: Effects
+    @Published private(set) var effect: CompanionEffect = .none
+    @Published private(set) var effectPhase: Int = 0
+
+    private let idleThreshold: TimeInterval = 30
+    private var lastActiveAt: Date = Date()
+    private var requestedEffects: [CompanionEffect] = []
+    private var effectTimer: Timer?
+    private var idleCheckTimer: Timer?
+
     private var tickIndex: Int = 0
     private var timer: Timer?
 
     private init() {
         loadCompanion()
         startAnimation()
+        startEffectTicker()
+        startIdleChecker()
     }
 
     deinit {
         timer?.invalidate()
+        effectTimer?.invalidate()
+        idleCheckTimer?.invalidate()
+    }
+
+    // MARK: - Public Effect API
+
+    /// Mark user as active; resets idle timer and clears sleeping effect.
+    func markActive() {
+        lastActiveAt = Date()
+        if requestedEffects.contains(.sleeping) {
+            requestedEffects.removeAll { $0 == .sleeping }
+            resolveEffect()
+        }
+    }
+
+    /// Request an effect from a particular source. Use clearEffect to remove.
+    func setEffect(_ effect: CompanionEffect) {
+        markActive()
+        if !requestedEffects.contains(effect) {
+            requestedEffects.append(effect)
+        }
+        resolveEffect()
+    }
+
+    func clearEffect(_ effect: CompanionEffect) {
+        requestedEffects.removeAll { $0 == effect }
+        resolveEffect()
+    }
+
+    // MARK: - Effect Ticker
+
+    private func startEffectTicker() {
+        // Re-create timer whenever effect changes so we match its tick interval.
+        scheduleEffectTimer()
+    }
+
+    private func scheduleEffectTimer() {
+        effectTimer?.invalidate()
+        guard effect != .none else { return }
+        effectTimer = Timer.scheduledTimer(withTimeInterval: effect.tickInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.effectPhase += 1
+            }
+        }
+    }
+
+    private func resolveEffect() {
+        let next = requestedEffects.max(by: { $0.priority < $1.priority }) ?? .none
+        guard next != effect else { return }
+        effect = next
+        effectPhase = 0
+        scheduleEffectTimer()
+    }
+
+    // MARK: - Idle Detection
+
+    private func startIdleChecker() {
+        idleCheckTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.checkIdle()
+            }
+        }
+    }
+
+    private func checkIdle() {
+        let idleTime = Date().timeIntervalSince(lastActiveAt)
+        if idleTime >= idleThreshold {
+            if !requestedEffects.contains(.sleeping) {
+                requestedEffects.append(.sleeping)
+                resolveEffect()
+            }
+        }
     }
 
     // MARK: - Loading

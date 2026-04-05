@@ -12,16 +12,27 @@ struct ClaudeCrabIcon: View {
     let size: CGFloat
     let color: Color
     var animateLegs: Bool = false
+    var pacing: Bool = false
+    var maxPacingOffset: CGFloat = 30
 
     @State private var legPhase: Int = 0
+    @State private var pacingOffset: CGFloat = 0
 
     // Timer for leg animation
     private let legTimer = Timer.publish(every: 0.15, on: .main, in: .common).autoconnect()
 
-    init(size: CGFloat = 16, color: Color = Color(red: 0.85, green: 0.47, blue: 0.34), animateLegs: Bool = false) {
+    init(
+        size: CGFloat = 16,
+        color: Color = Color(red: 0.85, green: 0.47, blue: 0.34),
+        animateLegs: Bool = false,
+        pacing: Bool = false,
+        maxPacingOffset: CGFloat = 30
+    ) {
         self.size = size
         self.color = color
         self.animateLegs = animateLegs
+        self.pacing = pacing
+        self.maxPacingOffset = maxPacingOffset
     }
 
     var body: some View {
@@ -54,7 +65,8 @@ struct ClaudeCrabIcon: View {
                 [0, 0, 0, 0],     // Phase 3: neutral
             ]
 
-            let currentHeightOffsets = animateLegs ? legHeightOffsets[legPhase % 4] : [CGFloat](repeating: 0, count: 4)
+            let shouldAnimateLegs = animateLegs || pacing
+            let currentHeightOffsets = shouldAnimateLegs ? legHeightOffsets[legPhase % 4] : [CGFloat](repeating: 0, count: 4)
 
             for (index, xPos) in baseLegPositions.enumerated() {
                 let heightOffset = currentHeightOffsets[index]
@@ -84,10 +96,32 @@ struct ClaudeCrabIcon: View {
             context.fill(rightEye, with: .color(.black))
         }
         .frame(width: size * (66.0 / 52.0), height: size)
+        .offset(x: pacing ? pacingOffset : 0)
         .onReceive(legTimer) { _ in
-            if animateLegs {
+            if animateLegs || pacing {
                 legPhase = (legPhase + 1) % 4
             }
+        }
+        .onAppear {
+            if pacing { stepPacing() }
+        }
+        .onChange(of: pacing) { _, newValue in
+            if newValue {
+                stepPacing()
+            } else {
+                withAnimation(.easeOut(duration: 0.2)) { pacingOffset = 0 }
+            }
+        }
+    }
+
+    private func stepPacing() {
+        guard pacing else { return }
+        let target: CGFloat = pacingOffset >= 0 ? -5 : 5
+        withAnimation(.easeInOut(duration: 1.2)) {
+            pacingOffset = target
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            stepPacing()
         }
     }
 }
@@ -109,6 +143,43 @@ struct PermissionIndicatorIcon: View {
         (15, 3), (15, 19), (15, 27), // Center column
         (19, 3), (19, 15),          // Right of center
         (23, 7), (23, 11)           // Right column
+    ]
+
+    var body: some View {
+        Canvas { context, canvasSize in
+            let scale = size / 30.0
+            let pixelSize: CGFloat = 4 * scale
+
+            for (x, y) in pixels {
+                let rect = CGRect(
+                    x: x * scale - pixelSize / 2,
+                    y: y * scale - pixelSize / 2,
+                    width: pixelSize,
+                    height: pixelSize
+                )
+                context.fill(Path(rect), with: .color(color))
+            }
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+// Pixel art "interrupted" indicator icon (X/cross shape)
+struct InterruptedIndicatorIcon: View {
+    let size: CGFloat
+    let color: Color
+
+    init(size: CGFloat = 14, color: Color = Color(red: 0.95, green: 0.3, blue: 0.3)) {
+        self.size = size
+        self.color = color
+    }
+
+    // X shape pixel positions (at 30x30 scale)
+    private let pixels: [(CGFloat, CGFloat)] = [
+        // Top-left to bottom-right diagonal
+        (5, 5), (9, 9), (13, 13), (17, 17), (21, 21), (25, 25),
+        // Top-right to bottom-left diagonal
+        (25, 5), (21, 9), (17, 13), (13, 17), (9, 21), (5, 25),
     ]
 
     var body: some View {
