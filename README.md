@@ -28,7 +28,24 @@
 
 ## Install
 
-Download the latest release DMG, or build from source:
+### From release (recommended)
+
+1. Download **ClaudeIsland-v1.4.dmg** (or `.zip`) from
+   [Releases](https://github.com/z3roll/claude-island/releases/latest).
+2. Open the DMG and drag `Claude Island.app` into `/Applications`.
+3. **Important:** because Claude Island is not yet notarized with
+   Apple, macOS will flag the bundle as quarantined and show
+   *"App is damaged and can't be opened"* on first launch. Remove the
+   quarantine attribute once:
+
+   ```bash
+   xattr -cr "/Applications/Claude Island.app"
+   ```
+
+4. Launch from Launchpad/Spotlight. Future auto-updates via Sparkle
+   do **not** re-trigger this warning.
+
+### Build from source
 
 ```bash
 ./scripts/build.sh
