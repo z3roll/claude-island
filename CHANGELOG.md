@@ -57,6 +57,15 @@
 
 ### Fixes
 
+- Fix panel disappearing when returning to the main list via two-finger
+  swipe-back (from chat or menu): the hover-bounds grace is now applied
+  on every transition into the instances page, matching the page-dot
+  click behaviour.
+- Fix chat view showing stale history while the main page already shows
+  a newer message: entering chat now always re-syncs from JSONL instead
+  of trusting the in-memory cache.
+- Fix git branch in the chat header not updating when you `git checkout`
+  another branch while the chat stays open.
 - Fix tool results staying empty after PostToolUse: JSONL sync now fills
   `result` / `structuredResult` on tools already marked `.success`.
 - Fix 5h/7d badge not clearing after uninstalling hooks.
