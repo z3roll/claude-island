@@ -8,6 +8,11 @@
 import Foundation
 import os.log
 
+extension Notification.Name {
+    static let claudeIslandHooksInstalled = Notification.Name("claudeIslandHooksInstalled")
+    static let claudeIslandHooksUninstalled = Notification.Name("claudeIslandHooksUninstalled")
+}
+
 private let logger = Logger(subsystem: "com.claudeisland", category: "HookInstaller")
 
 struct HookInstaller {
@@ -182,41 +187,135 @@ struct HookInstaller {
         }
     }
 
+
+    /// Backup file for the user's original statusLine command (persists across
+    /// install/uninstall cycles so we can restore or re-wrap after external tools
+    /// like claude-hud overwrite settings.json).
+    private static var statusLineBackupURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/.claude-island-statusline-backup.json")
+    }
+
+    /// Read the persisted original statusLine command.
+    private static func readStatusLineBackup() -> [String: Any]? {
+        guard let data = try? Data(contentsOf: statusLineBackupURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return json
+    }
+
+    /// Persist the user's original statusLine config for later restoration.
+    private static func writeStatusLineBackup(_ config: [String: Any]) {
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: config,
+            options: [.prettyPrinted, .sortedKeys]
+        ) else { return }
+        try? data.write(to: statusLineBackupURL)
+    }
+
     /// Configure statusLine to use our wrapper that caches session metadata.
-    /// The wrapper script writes {model, context_pct} to $TMPDIR per session,
-    /// then passes stdin through to the user's original statusLine command.
+    /// The wrapper always outputs a status line for the CLI HUD:
+    /// - If the user has a custom statusLine command, it wraps it (pass-through)
+    /// - If not, it outputs a built-in default (model, context, 5h, 7d usage)
     private static func configureStatusLine(in json: inout [String: Any]) {
         let wrapperCommand = "bash ~/.claude/hooks/claude-island-statusline.sh"
+        let existingStatusLine = json["statusLine"] as? [String: Any]
+        let existingCommand = existingStatusLine?["command"] as? String
+        let isOurWrapper = existingCommand?.contains("claude-island-statusline") ?? false
 
-        // Read the user's current statusLine command (if not already ours)
+        // Determine the "original" command to wrap:
+        //   - If settings has a NON-wrapper command → that's a new external HUD
+        //     (e.g., user just ran /claude-hud:setup). Capture it, update backup.
+        //   - If settings already has OUR wrapper → use backup's command (if any).
         var originalCommand: String?
-        if let existing = json["statusLine"] as? [String: Any],
-           let cmd = existing["command"] as? String,
-           !cmd.contains("claude-island-statusline") {
+        if !isOurWrapper, let cmd = existingCommand, !cmd.isEmpty {
+            originalCommand = cmd
+            // Save non-wrapper command to backup (also preserve other keys)
+            var backup: [String: Any] = ["command": cmd]
+            if let existing = existingStatusLine {
+                for (key, value) in existing where key != "command" {
+                    backup[key] = value
+                }
+            }
+            writeStatusLineBackup(backup)
+            logger.info("Captured statusLine command to backup: \(cmd, privacy: .public)")
+        } else if let backup = readStatusLineBackup(),
+                  let cmd = backup["command"] as? String,
+                  !cmd.isEmpty {
             originalCommand = cmd
         }
 
-        // Patch the wrapper script to call the original command
+        // Write the original command to a sidecar shell script. The wrapper
+        // executes this script via bash (no eval), which preserves all quoting.
+        let sidecarPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/hooks/.claude-island-original-statusline.sh")
         if let original = originalCommand {
-            let scriptPath = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".claude/hooks/claude-island-statusline.sh")
-            if var content = try? String(contentsOf: scriptPath, encoding: .utf8) {
-                content = content.replacingOccurrences(of: "_CI_HAS_ORIGINAL=0", with: "_CI_HAS_ORIGINAL=1")
-                content = content.replacingOccurrences(of: "_CI_ORIGINAL_CMD=\"\"", with: "_CI_ORIGINAL_CMD=\"\(original)\"")
-                try? content.write(to: scriptPath, atomically: true, encoding: .utf8)
-                logger.info("Patched statusLine wrapper to call: \(original, privacy: .public)")
-            }
+            let content = "#!/bin/bash\n\(original)\n"
+            try? content.write(to: sidecarPath, atomically: true, encoding: .utf8)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: sidecarPath.path
+            )
+            logger.info("Wrote statusLine sidecar to call: \(original, privacy: .public)")
+        } else {
+            // Remove sidecar if no original (wrapper falls back to built-in default)
+            try? FileManager.default.removeItem(at: sidecarPath)
+            logger.info("No original statusLine — wrapper will use built-in default")
         }
 
-        // Set our wrapper as the statusLine command
-        var statusLineConfig: [String: Any] = ["command": wrapperCommand]
-        // Preserve existing refreshInterval or other fields
-        if let existing = json["statusLine"] as? [String: Any] {
-            for (key, value) in existing where key != "command" {
+        // Always set our wrapper as the statusLine command
+        var statusLineConfig: [String: Any] = [
+            "type": "command",
+            "command": wrapperCommand
+        ]
+        // Preserve any extra keys from backup (e.g., padding) when restoring.
+        if let backup = readStatusLineBackup() {
+            for (key, value) in backup where key != "command" && key != "type" {
                 statusLineConfig[key] = value
             }
         }
         json["statusLine"] = statusLineConfig
+    }
+
+    /// Reset wrapper script's _CI_HAS_ORIGINAL / _CI_ORIGINAL_CMD lines back to
+    /// the default blank state before re-patching.
+    private static func resetWrapperPatch(_ content: String) -> String {
+        var out = content
+        // Match any line "_CI_HAS_ORIGINAL=<x>" → reset to 0
+        out = out.replacingOccurrences(
+            of: #"_CI_HAS_ORIGINAL=\d+"#,
+            with: "_CI_HAS_ORIGINAL=0",
+            options: .regularExpression
+        )
+        // Match any line '_CI_ORIGINAL_CMD="..."' (greedy match until end of line)
+        out = out.replacingOccurrences(
+            of: #"_CI_ORIGINAL_CMD=\"[^\"]*\""#,
+            with: "_CI_ORIGINAL_CMD=\"\"",
+            options: .regularExpression
+        )
+        return out
+    }
+
+    /// Called on app launch to self-heal if an external tool overwrote our
+    /// statusLine configuration. Only runs when hooks are already installed.
+    static func ensureStatusLineSelfHeal() {
+        guard isInstalled() else { return }
+        let settingsURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/settings.json")
+        guard let data = try? Data(contentsOf: settingsURL),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return }
+        let existingCommand = (json["statusLine"] as? [String: Any])?["command"] as? String
+        let isOurWrapper = existingCommand?.contains("claude-island-statusline") ?? false
+        if isOurWrapper { return } // Nothing to heal
+        logger.info("StatusLine was overwritten externally — re-wrapping")
+        configureStatusLine(in: &json)
+        if let data = try? JSONSerialization.data(
+            withJSONObject: json,
+            options: [.prettyPrinted, .sortedKeys]
+        ) {
+            try? data.write(to: settingsURL)
+        }
     }
 
     /// Check if hooks are currently installed (all required events present)
@@ -276,6 +375,22 @@ struct HookInstaller {
 
         try? FileManager.default.removeItem(at: pythonScript)
         try? FileManager.default.removeItem(at: statusLineScript)
+        let sidecarPath = hooksDir.appendingPathComponent(".claude-island-original-statusline.sh")
+        try? FileManager.default.removeItem(at: sidecarPath)
+
+        // Clean up cached session metadata files so SessionMetadataService
+        // stops displaying stale model/context/token info.
+        let tmpDir = NSTemporaryDirectory()
+        if let contents = try? FileManager.default.contentsOfDirectory(atPath: tmpDir) {
+            for filename in contents {
+                if filename.hasPrefix("claude-island-session-") && filename.hasSuffix(".json") {
+                    let path = (tmpDir as NSString).appendingPathComponent(filename)
+                    try? FileManager.default.removeItem(atPath: path)
+                }
+            }
+        }
+        let usageCache = (tmpDir as NSString).appendingPathComponent("claude-usage-cache.json")
+        try? FileManager.default.removeItem(atPath: usageCache)
 
         guard let data = try? Data(contentsOf: settings),
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -309,11 +424,25 @@ struct HookInstaller {
             json["hooks"] = hooks
         }
 
-        // Remove statusLine if it's ours
+        // Restore original statusLine from backup if we are replacing our wrapper
         if let statusLine = json["statusLine"] as? [String: Any],
            let cmd = statusLine["command"] as? String,
            cmd.contains("claude-island-statusline") {
-            json.removeValue(forKey: "statusLine")
+            if let backup = readStatusLineBackup(),
+               let original = backup["command"] as? String,
+               !original.isEmpty {
+                var restored: [String: Any] = [
+                    "type": "command",
+                    "command": original
+                ]
+                for (key, value) in backup where key != "command" && key != "type" {
+                    restored[key] = value
+                }
+                json["statusLine"] = restored
+                logger.info("Restored original statusLine: \(original, privacy: .public)")
+            } else {
+                json.removeValue(forKey: "statusLine")
+            }
         }
 
         if let data = try? JSONSerialization.data(
