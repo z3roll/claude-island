@@ -140,6 +140,15 @@ actor SessionStore {
         }
         session.pid = event.pid
         if let pid = event.pid {
+            // Refresh user-set name from PID json each hook event — cheap, and
+            // catches `/rename` without extra polling.
+            if let json = Self.readSessionPidJson(pid: pid),
+               let name = (json["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !name.isEmpty {
+                session.userName = name
+            } else {
+                session.userName = nil
+            }
             let tree = ProcessTreeBuilder.shared.buildTree()
             let detectedTmux = ProcessTreeBuilder.shared.isInTmux(pid: pid, tree: tree)
             // Only upgrade to tmux, never downgrade (process tree can be transiently incomplete)
@@ -210,15 +219,16 @@ actor SessionStore {
     }
 
     private func createSession(from event: HookEvent) -> SessionState {
-        // Try to read startedAt from session JSON file
+        // Try to read startedAt + user-set name from session JSON file
         var createdAt = Date()
+        var userName: String?
         if let pid = event.pid {
-            let sessionFile = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".claude/sessions/\(pid).json")
-            if let data = try? Data(contentsOf: sessionFile),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let startedAtMs = json["startedAt"] as? Double {
-                createdAt = Date(timeIntervalSince1970: startedAtMs / 1000)
+            if let json = Self.readSessionPidJson(pid: pid) {
+                if let startedAtMs = json["startedAt"] as? Double {
+                    createdAt = Date(timeIntervalSince1970: startedAtMs / 1000)
+                }
+                userName = (json["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                if userName?.isEmpty == true { userName = nil }
             }
         }
 
@@ -226,12 +236,22 @@ actor SessionStore {
             sessionId: event.sessionId,
             cwd: event.cwd,
             projectName: URL(fileURLWithPath: event.cwd).lastPathComponent,
+            userName: userName,
             pid: event.pid,
             tty: event.tty?.replacingOccurrences(of: "/dev/", with: ""),
             isInTmux: false,  // Will be updated
             phase: .idle,
             createdAt: createdAt
         )
+    }
+
+    nonisolated private static func readSessionPidJson(pid: Int) -> [String: Any]? {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/sessions/\(pid).json")
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return json
     }
 
     private func processToolTracking(event: HookEvent, session: inout SessionState) {

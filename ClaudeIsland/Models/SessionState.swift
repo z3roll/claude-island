@@ -17,6 +17,9 @@ struct SessionState: Equatable, Identifiable, Sendable {
     var cwd: String
     var projectName: String
 
+    /// User-set session name from `~/.claude/sessions/<pid>.json` (via /rename)
+    var userName: String?
+
     // MARK: - Instance Metadata
 
     var pid: Int?
@@ -76,6 +79,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
         sessionId: String,
         cwd: String,
         projectName: String? = nil,
+        userName: String? = nil,
         pid: Int? = nil,
         tty: String? = nil,
         isInTmux: Bool = false,
@@ -96,6 +100,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
         self.sessionId = sessionId
         self.cwd = cwd
         self.projectName = projectName ?? URL(fileURLWithPath: cwd).lastPathComponent
+        self.userName = userName
         self.pid = pid
         self.tty = tty
         self.isInTmux = isInTmux
@@ -144,9 +149,10 @@ struct SessionState: Equatable, Identifiable, Sendable {
         return sessionId
     }
 
-    /// Display title: summary > first user message > project name
+    /// Display title: user-set name (via /rename) > summary > first user message > project name
     var displayTitle: String {
-        conversationInfo.summary ?? conversationInfo.firstUserMessage ?? projectName
+        if let userName, !userName.isEmpty { return userName }
+        return conversationInfo.summary ?? conversationInfo.firstUserMessage ?? projectName
     }
 
     /// Best hint for matching window title
