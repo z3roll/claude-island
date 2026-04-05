@@ -185,8 +185,21 @@ actor ConversationParser {
                 }
             }
 
+            // Old-style summary line (pre-2.x Claude Code) — still honoured
             if summary == nil, type == "summary", let summaryText = json["summary"] as? String {
                 summary = summaryText
+            }
+
+            // New-style: auto-compaction writes a user message carrying the
+            // previous conversation's summary. `isCompactSummary:true` is the
+            // explicit marker; older builds just use the well-known prefix.
+            if summary == nil, type == "user" {
+                let isCompact = json["isCompactSummary"] as? Bool ?? false
+                if let message = json["message"] as? [String: Any],
+                   let msgContent = message["content"] as? String,
+                   isCompact || msgContent.hasPrefix("This session is being continued from a previous conversation") {
+                    summary = Self.extractCompactSummaryTitle(from: msgContent)
+                }
             }
 
             if summary != nil && lastMessage != nil && foundLastUserMessage {
@@ -202,6 +215,49 @@ actor ConversationParser {
             firstUserMessage: firstUserMessage,
             lastUserMessageDate: lastUserMessageDate
         )
+    }
+
+    /// Extract a short title from a compact-summary user message.
+    /// The content starts with the "continued from previous conversation" blurb
+    /// and contains a structured summary. We grab the first chunk of the
+    /// "Primary Request and Intent" section, which encodes what the session is
+    /// actually about.
+    private static func extractCompactSummaryTitle(from content: String) -> String? {
+        // Find the "Primary Request and Intent" heading (numbered or markdown).
+        let needles = [
+            "1. Primary Request and Intent:",
+            "## Primary Request and Intent",
+            "Primary Request and Intent:"
+        ]
+        var range: Range<String.Index>?
+        for needle in needles {
+            if let r = content.range(of: needle) { range = r; break }
+        }
+        guard let headingEnd = range?.upperBound else { return nil }
+
+        let afterHeading = content[headingEnd...]
+        // Strip leading whitespace/newlines, then take until next blank line
+        // or section heading (a line beginning with "2." or "##").
+        let trimmed = afterHeading.drop { $0 == "\n" || $0 == " " || $0 == "\t" }
+        var title = ""
+        var previousWasNewline = false
+        for ch in trimmed {
+            if ch == "\n" {
+                if previousWasNewline { break }  // double newline → end of section
+                title.append(" ")
+                previousWasNewline = true
+                continue
+            }
+            previousWasNewline = false
+            title.append(ch)
+            if title.count >= 200 { break }
+        }
+        title = title.trimmingCharacters(in: .whitespaces)
+        // Drop a "2. …" section that snuck in on the same line.
+        if let hit = title.range(of: #"\s[0-9]+\. [A-Z]"#, options: .regularExpression) {
+            title = String(title[..<hit.lowerBound])
+        }
+        return Self.truncateMessage(title, maxLength: 80)
     }
 
     /// Format tool input for display in instance list
