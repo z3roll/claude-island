@@ -166,7 +166,7 @@ struct ToolCallItem: Equatable, Sendable {
         if status == .interrupted {
             return ToolStatusDisplay(text: "Interrupted", isRunning: false)
         }
-        return ToolStatusDisplay.completed(for: name, result: structuredResult)
+        return ToolStatusDisplay.completed(for: name, result: structuredResult, input: input)
     }
 
     // Custom Equatable implementation to handle structuredResult

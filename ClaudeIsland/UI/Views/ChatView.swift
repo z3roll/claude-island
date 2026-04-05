@@ -7,6 +7,7 @@
 
 import Combine
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ChatView: View {
     let sessionId: String
@@ -14,7 +15,7 @@ struct ChatView: View {
     let sessionMonitor: ClaudeSessionMonitor
     @ObservedObject var viewModel: NotchViewModel
 
-    @State private var inputText: String = ""
+    @State private var inputText: String
     @State private var history: [ChatHistoryItem] = []
     @State private var session: SessionState
     @ObservedObject private var metadataService = SessionMetadataService.shared
@@ -25,7 +26,21 @@ struct ChatView: View {
     @State private var newMessageCount: Int = 0
     @State private var previousHistoryCount: Int = 0
     @State private var isBottomVisible: Bool = true
+    @State private var localInterrupted: Bool = false
+    @State private var currentSpinnerVerb: String = ""
+    @State private var gitBranch: String = ""
+    @State private var loadedItemCount: Int = 0
+    @State private var hasMoreHistory: Bool = false
+    @State private var isLoadingMore: Bool = false
+    @State private var pendingUserMessage: String? = nil
+    @State private var pastedTextStore: [String: String] = [:]
+    @State private var pasteCounter: Int = 0
+    @State private var pasteMonitor: Any? = nil
     @FocusState private var isInputFocused: Bool
+
+    private static let initialLoadSize = 5
+
+    static var initStartTime: CFAbsoluteTime = 0
 
     init(sessionId: String, initialSession: SessionState, sessionMonitor: ClaudeSessionMonitor, viewModel: NotchViewModel) {
         self.sessionId = sessionId
@@ -33,11 +48,20 @@ struct ChatView: View {
         self.sessionMonitor = sessionMonitor
         self._viewModel = ObservedObject(wrappedValue: viewModel)
         self._session = State(initialValue: initialSession)
+        self._inputText = State(initialValue: ChatInputStore.shared.draft(for: sessionId))
 
-        // Initialize from cache if available (prevents loading flicker on view recreation)
+        // Initialize from cache: only load the last few items for instant display
         let cachedHistory = ChatHistoryManager.shared.history(for: sessionId)
         let alreadyLoaded = !cachedHistory.isEmpty
-        self._history = State(initialValue: cachedHistory)
+        let initialItems: [ChatHistoryItem]
+        if cachedHistory.count > Self.initialLoadSize {
+            initialItems = Array(cachedHistory.suffix(Self.initialLoadSize))
+        } else {
+            initialItems = cachedHistory
+        }
+        self._history = State(initialValue: initialItems)
+        self._loadedItemCount = State(initialValue: initialItems.count)
+        self._hasMoreHistory = State(initialValue: cachedHistory.count > initialItems.count)
         self._isLoading = State(initialValue: !alreadyLoaded)
         self._hasLoadedOnce = State(initialValue: alreadyLoaded)
     }
@@ -61,13 +85,24 @@ struct ChatView: View {
             chatHeader
 
             // Messages
-            if isLoading {
-                loadingState
-            } else if history.isEmpty {
-                emptyState
-            } else {
-                messageList
+            Group {
+                if isLoading {
+                    loadingState
+                } else if history.isEmpty {
+                    emptyState
+                } else {
+                    messageList
+                }
             }
+            .clipShape(
+                .rect(
+                    topLeadingRadius: 0,
+                    bottomLeadingRadius: 14,
+                    bottomTrailingRadius: 14,
+                    topTrailingRadius: 0
+                )
+            )
+            .padding(.bottom, 8)
 
             // Approval bar, interactive prompt, or Input bar
             if let tool = approvalTool {
@@ -93,9 +128,27 @@ struct ChatView: View {
                 .transition(.opacity)
             }
         }
+        .onKeyPress(.escape) {
+            if isProcessing {
+                interruptSession()
+                return .handled
+            }
+            return .ignored
+        }
+        .swipeBack {
+            viewModel.exitChat()
+        }
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: isWaitingForApproval)
         .animation(nil, value: viewModel.status)
         .task {
+            // Pick spinner verb if already processing when chat opens
+            if isProcessing && currentSpinnerVerb.isEmpty {
+                currentSpinnerVerb = ProcessingIndicatorView.randomVerb()
+            }
+
+            // Load git branch in background (don't block UI)
+            Task { gitBranch = await Self.getGitBranch(cwd: session.cwd) }
+
             // Skip if already loaded (prevents redundant work on view recreation)
             guard !hasLoadedOnce else { return }
             hasLoadedOnce = true
@@ -104,15 +157,31 @@ struct ChatView: View {
             if ChatHistoryManager.shared.isLoaded(sessionId: sessionId) {
                 let cached = ChatHistoryManager.shared.history(for: sessionId)
                 if !cached.isEmpty {
-                    history = cached
+                    // Show initial items immediately, then load rest in background
+                    if history.isEmpty {
+                        let tail = Array(cached.suffix(Self.initialLoadSize))
+                        history = tail
+                        loadedItemCount = tail.count
+                    }
                     isLoading = false
+                    // Background load remaining history
+                    Task {
+                        try? await Task.sleep(nanoseconds: 100_000_000) // 100ms delay
+                        let full = ChatHistoryManager.shared.history(for: sessionId)
+                        history = full
+                        loadedItemCount = full.count
+                        hasMoreHistory = false
+                    }
                     return
                 }
             }
 
             // Load/sync from JSONL file
             await ChatHistoryManager.shared.syncFromFile(sessionId: sessionId, cwd: session.cwd)
-            history = ChatHistoryManager.shared.history(for: sessionId)
+            let full = ChatHistoryManager.shared.history(for: sessionId)
+            history = full
+            loadedItemCount = full.count
+            hasMoreHistory = false
 
             withAnimation(.easeOut(duration: 0.2)) {
                 isLoading = false
@@ -123,8 +192,6 @@ struct ChatView: View {
             if let newHistory = histories[sessionId] {
                 let countChanged = newHistory.count != history.count
                 let lastItemChanged = newHistory.last?.id != history.last?.id
-                // Always update - the @Published ensures we only get notified on real changes
-                // This allows tool status updates (waitingForApproval -> running) to reflect
                 if countChanged || lastItemChanged || newHistory != history {
                     // Track new messages when autoscroll is paused
                     if isAutoscrollPaused && newHistory.count > previousHistoryCount {
@@ -134,6 +201,24 @@ struct ChatView: View {
                     }
 
                     history = newHistory
+                    loadedItemCount = newHistory.count
+
+                    // Clear pending when a NEWER message exists in history after the
+                    // matching user message (i.e., assistant has replied). Until then,
+                    // pending stays visible and the matching history item is filtered
+                    // out in the render path to avoid visual swap.
+                    if let pending = pendingUserMessage,
+                       let matchIdx = newHistory.lastIndex(where: {
+                           if case .user(let text) = $0.type { return text == pending }
+                           return false
+                       }),
+                       matchIdx < newHistory.count - 1 {
+                        var tx = Transaction()
+                        tx.disablesAnimations = true
+                        withTransaction(tx) {
+                            pendingUserMessage = nil
+                        }
+                    }
 
                     // Auto-scroll to bottom only if autoscroll is NOT paused
                     if !isAutoscrollPaused && countChanged {
@@ -153,10 +238,25 @@ struct ChatView: View {
         .onReceive(sessionMonitor.$instances) { sessions in
             if let updated = sessions.first(where: { $0.sessionId == sessionId }),
                updated != session {
+                // Refresh git branch if cwd changed
+                let cwdChanged = updated.cwd != session.cwd
                 // Check if permission was just accepted (transition from waitingForApproval to processing)
                 let wasWaiting = isWaitingForApproval
                 session = updated
+                if cwdChanged {
+                    Task { gitBranch = await Self.getGitBranch(cwd: updated.cwd) }
+                }
                 let isNowProcessing = updated.phase == .processing
+
+                // Pick a spinner verb if processing and no verb set yet
+                if isNowProcessing && currentSpinnerVerb.isEmpty {
+                    currentSpinnerVerb = ProcessingIndicatorView.randomVerb()
+                }
+
+                // Reset spinner verb when processing ends
+                if !isNowProcessing && !currentSpinnerVerb.isEmpty {
+                    currentSpinnerVerb = ""
+                }
 
                 if wasWaiting && isNowProcessing {
                     // Scroll to bottom after permission accepted (with slight delay)
@@ -167,20 +267,51 @@ struct ChatView: View {
             }
         }
         .onChange(of: canSendMessages) { _, canSend in
-            // Auto-focus input when tmux messaging becomes available
-            if canSend && !isInputFocused {
+            // Auto-focus input when tmux messaging becomes available.
+            // Skip if there's already text to avoid select-all-on-focus.
+            if canSend && !isInputFocused && inputText.isEmpty {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     isInputFocused = true
                 }
             }
         }
+        .onChange(of: isInputFocused) { _, focused in
+            if focused {
+                companionService.setEffect(.typing)
+                installPasteMonitor()
+            } else {
+                companionService.clearEffect(.typing)
+                removePasteMonitor()
+            }
+        }
+        .onChange(of: session.phase) { _, phase in
+            companionService.markActive()
+            if phase == .processing {
+                companionService.setEffect(.thinking)
+            } else {
+                companionService.clearEffect(.thinking)
+            }
+        }
         .onAppear {
-            // Auto-focus input when chat opens and tmux messaging is available
+            // Auto-focus input when chat opens and tmux messaging is available.
+            // But don't auto-focus if there's already text, to avoid AppKit's
+            // default "select all on focus" behavior stomping the user's draft.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                if canSendMessages {
+                if canSendMessages && inputText.isEmpty {
                     isInputFocused = true
                 }
             }
+            // Sync thinking effect with current phase
+            if session.phase == .processing {
+                companionService.setEffect(.thinking)
+            } else {
+                companionService.clearEffect(.thinking)
+            }
+        }
+        .onDisappear {
+            companionService.clearEffect(.typing)
+            companionService.clearEffect(.thinking)
+            removePasteMonitor()
         }
     }
 
@@ -217,45 +348,16 @@ struct ChatView: View {
                         .foregroundColor(.white.opacity(isHeaderHovered ? 1.0 : 0.85))
                         .lineLimit(1)
                 }
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .onHover { isHeaderHovered = $0 }
 
             Spacer()
 
-            // Terminal + Model + Context badges (card style)
+            // Menu toggle area (keep spacing)
             HStack(spacing: 4) {
-                if let terminal = session.resolvedTerminal {
-                    Text(terminal.appInfo.type.rawValue)
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundColor(.white.opacity(0.3))
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(Color.white.opacity(0.06))
-                        .clipShape(Capsule())
-                }
-
-                if let meta = SessionMetadataService.shared.metadata(for: sessionId) {
-                    if let model = meta.model {
-                        Text(shortModelName(model))
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundColor(.white.opacity(0.25))
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Color.white.opacity(0.06))
-                            .clipShape(Capsule())
-                    }
-
-                    if let ctx = meta.contextPercentage {
-                        Text("context:\(String(format: "%.0f", ctx))%")
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundColor(.white.opacity(0.25))
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Color.white.opacity(0.06))
-                            .clipShape(Capsule())
-                    }
-                }
             }
         }
         .padding(.horizontal, 12)
@@ -334,8 +436,8 @@ struct ChatView: View {
                         .id("bottom")
 
                     // Processing indicator at bottom (first due to flip)
-                    if isProcessing {
-                        ProcessingIndicatorView(turnId: lastUserMessageId)
+                    if isProcessing && !localInterrupted {
+                        ProcessingIndicatorView(verb: currentSpinnerVerb)
                             .padding(.horizontal, 16)
                             .scaleEffect(x: 1, y: -1)
                             .transition(.asymmetric(
@@ -344,22 +446,38 @@ struct ChatView: View {
                             ))
                     }
 
-                    ForEach(history.reversed()) { item in
+                    // Pending user message (visible until JSONL sync includes it)
+                    if let pending = pendingUserMessage {
+                        UserMessageView(text: pending)
+                            .padding(.horizontal, 16)
+                            .scaleEffect(x: 1, y: -1)
+                            .transition(.identity)
+                    }
+
+                    ForEach(filteredHistoryForRender.reversed()) { item in
                         MessageItemView(item: item, sessionId: sessionId)
                             .padding(.horizontal, 16)
                             .scaleEffect(x: 1, y: -1)
-                            .transition(.asymmetric(
-                                insertion: .opacity.combined(with: .scale(scale: 0.98)),
-                                removal: .opacity
-                            ))
+                            .transition(
+                                isAutoscrollPaused
+                                    ? .identity
+                                    : .asymmetric(
+                                        insertion: .opacity.combined(with: .scale(scale: 0.98)),
+                                        removal: .opacity
+                                    )
+                            )
                     }
+
                 }
                 .padding(.top, 20)
                 .padding(.bottom, 20)
-                .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isProcessing)
-                .animation(.spring(response: 0.3, dampingFraction: 0.8), value: history.count)
+                .animation(isAutoscrollPaused ? nil : .spring(response: 0.3, dampingFraction: 0.8), value: isProcessing)
+                .animation(isAutoscrollPaused ? nil : .spring(response: 0.3, dampingFraction: 0.8), value: history.count)
             }
             .scaleEffect(x: 1, y: -1)
+            .simultaneousGesture(
+                TapGesture().onEnded { isInputFocused = false }
+            )
             .onScrollGeometryChange(for: Bool.self) { geometry in
                 // Check if we're near the top of the content (which is bottom in inverted view)
                 // contentOffset.y near 0 means at bottom, larger means scrolled up
@@ -404,6 +522,86 @@ struct ChatView: View {
         }
     }
 
+    // MARK: - CWD Bar
+
+    private func cwdContextColor(_ pct: Double) -> Color {
+        if pct >= 90 { return Color(red: 0.95, green: 0.3, blue: 0.3) }
+        if pct >= 70 { return Color(red: 0.95, green: 0.55, blue: 0.25) }
+        if pct >= 50 { return Color(red: 0.95, green: 0.8, blue: 0.3) }
+        return Color(red: 0.4, green: 0.85, blue: 0.45)
+    }
+
+    private var cwdBar: some View {
+        HStack(spacing: 6) {
+            // Model (blue)
+            if let meta = SessionMetadataService.shared.metadata(for: sessionId),
+               let model = meta.model {
+                Text(shortModelName(model))
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(Color(red: 0.4, green: 0.6, blue: 0.95))
+                    .lineLimit(1)
+            }
+
+            // Context (label gray, percentage colored)
+            if let meta = SessionMetadataService.shared.metadata(for: sessionId),
+               let ctx = meta.contextPercentage {
+                HStack(spacing: 2) {
+                    Text("context:")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.35))
+                    Text("\(String(format: "%.0f", ctx))%")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(cwdContextColor(ctx))
+                }
+            }
+
+            // Folder + directory name (cyan)
+            Image(systemName: "folder")
+                .font(.system(size: 9))
+                .foregroundColor(Color(red: 0.4, green: 0.8, blue: 0.85).opacity(0.6))
+            Text(URL(fileURLWithPath: session.cwd).lastPathComponent)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundColor(Color(red: 0.4, green: 0.8, blue: 0.85).opacity(0.7))
+                .lineLimit(1)
+
+            // Git branch (purple)
+            if !gitBranch.isEmpty {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 9))
+                    .foregroundColor(Color(red: 0.7, green: 0.5, blue: 0.9).opacity(0.6))
+                Text(gitBranch)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(Color(red: 0.7, green: 0.5, blue: 0.9).opacity(0.7))
+                    .lineLimit(1)
+            }
+
+            Spacer()
+        }
+        .padding(.leading, 6)
+        .padding(.top, 0)
+        .padding(.bottom, 2)
+    }
+
+    private static func getGitBranch(cwd: String) async -> String {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"]
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        process.environment = ["GIT_OPTIONAL_LOCKS": "0"]
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return "" }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        } catch {
+            return ""
+        }
+    }
+
     // MARK: - Input Bar
 
     /// Can send messages only if session is in tmux
@@ -412,7 +610,9 @@ struct ChatView: View {
     }
 
     private var inputBar: some View {
-        HStack(spacing: 10) {
+        VStack(spacing: 4) {
+            cwdBar
+            HStack(spacing: 10) {
             TextField(canSendMessages ? "Message Claude..." : "Open Claude Code in tmux to enable messaging", text: $inputText)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
@@ -426,25 +626,35 @@ struct ChatView: View {
                         .fill(Color.white.opacity(canSendMessages ? 0.08 : 0.04))
                         .overlay(
                             RoundedRectangle(cornerRadius: 20)
-                                .strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
+                                .strokeBorder(
+                                    isInputFocused ? Color.white.opacity(0.22) : Color.white.opacity(0.1),
+                                    lineWidth: 1
+                                )
                         )
+                        .shadow(color: isInputFocused ? Color.white.opacity(0.08) : .clear, radius: 4)
+                        .animation(.easeInOut(duration: 0.18), value: isInputFocused)
                 )
+                .contentShape(RoundedRectangle(cornerRadius: 20))
+                .pointerStyle(canSendMessages ? .horizontalText : .default)
+                .onTapGesture {
+                    if canSendMessages { isInputFocused = true }
+                }
+                .onChange(of: inputText) { _, newValue in
+                    ChatInputStore.shared.setDraft(newValue, for: sessionId)
+                    companionService.markActive()
+                }
                 .onSubmit {
                     sendMessage()
                 }
 
-            Button {
-                sendMessage()
-            } label: {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 28))
-                    .foregroundColor(!canSendMessages || inputText.isEmpty ? .white.opacity(0.2) : .white.opacity(0.9))
-            }
-            .buttonStyle(.plain)
-            .disabled(!canSendMessages || inputText.isEmpty)
+            SendButton(
+                enabled: canSendMessages && !inputText.isEmpty,
+                action: sendMessage
+            )
+        }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.vertical, 8)
         .background(Color.black.opacity(0.2))
         .overlay(alignment: .top) {
             LinearGradient(
@@ -478,6 +688,21 @@ struct ChatView: View {
             isInTmux: session.isInTmux,
             onGoToTerminal: { focusTerminal() }
         )
+    }
+
+    /// History with the pending user message's duplicate filtered out.
+    /// Keeps the pending message visually stable (no swap) while the real one
+    /// is present in history.
+    private var filteredHistoryForRender: [ChatHistoryItem] {
+        guard let pending = pendingUserMessage else { return history }
+        var result = history
+        if let idx = result.lastIndex(where: { item in
+            if case .user(let text) = item.type { return text == pending }
+            return false
+        }) {
+            result.remove(at: idx)
+        }
+        return result
     }
 
     // MARK: - Autoscroll Management
@@ -522,19 +747,75 @@ struct ChatView: View {
         sessionMonitor.denyPermission(sessionId: sessionId, reason: nil)
     }
 
+    /// Install NSEvent local monitor to intercept Cmd+V while input is focused.
+    private func installPasteMonitor() {
+        guard pasteMonitor == nil else { return }
+        pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // Cmd+V: keyCode 9, or use charactersIgnoringModifiers
+            let isCmdV = event.modifierFlags.contains(.command)
+                && event.charactersIgnoringModifiers?.lowercased() == "v"
+                && !event.modifierFlags.contains(.option)
+                && !event.modifierFlags.contains(.control)
+            guard isCmdV else { return event }
+            guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
+                return event
+            }
+            insertPaste(text)
+            return nil // swallow the event so default paste doesn't fire
+        }
+    }
+
+    private func removePasteMonitor() {
+        if let m = pasteMonitor {
+            NSEvent.removeMonitor(m)
+            pasteMonitor = nil
+        }
+    }
+
+    private func insertPaste(_ text: String) {
+        let lineCount = text.split(separator: "\n", omittingEmptySubsequences: false).count
+        let longEnough = lineCount > 3 || text.count > 200
+        if longEnough {
+            pasteCounter += 1
+            let placeholder = "[Pasted text #\(pasteCounter) +\(lineCount) lines]"
+            pastedTextStore[placeholder] = text
+            inputText += placeholder
+        } else {
+            inputText += text
+        }
+    }
+
+    /// Expand any paste placeholders in `text` back to their original content.
+    private func expandPastePlaceholders(_ text: String) -> String {
+        var expanded = text
+        for (placeholder, original) in pastedTextStore {
+            expanded = expanded.replacingOccurrences(of: placeholder, with: original)
+        }
+        return expanded
+    }
+
     private func sendMessage() {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
 
+        // Expand placeholders to original pasted text before sending.
+        let expandedText = expandPastePlaceholders(text)
+
+        localInterrupted = false
+        currentSpinnerVerb = ProcessingIndicatorView.randomVerb()
+        pendingUserMessage = expandedText
         inputText = ""
+        pastedTextStore.removeAll()
+        pasteCounter = 0
+        ChatInputStore.shared.clearDraft(for: sessionId)
 
         // Resume autoscroll when user sends a message
         resumeAutoscroll()
         shouldScrollToBottom = true
 
         // Don't add to history here - it will be synced from JSONL when UserPromptSubmit event fires
-        Task {
-            await sendToSession(text)
+        Task { [expandedText] in
+            await sendToSession(expandedText)
         }
     }
 
@@ -543,7 +824,93 @@ struct ChatView: View {
         guard let tty = session.tty else { return }
 
         if let target = await findTmuxTarget(tty: tty) {
+            guard let tmuxPath = await TmuxPathFinder.shared.getTmuxPath() else { return }
+            // Clear existing input line (Ctrl+U) before sending new text
+            _ = try? await ProcessExecutor.shared.run(
+                tmuxPath,
+                arguments: ["send-keys", "-t", target.targetString, "C-u"]
+            )
+
+            let lineCount = text.split(separator: "\n", omittingEmptySubsequences: false).count
+            let shouldUsePaste = lineCount > 1 || text.count > 200
+            if shouldUsePaste {
+                let pasted = await sendViaBracketedPaste(
+                    tmuxPath: tmuxPath,
+                    target: target.targetString,
+                    text: text
+                )
+                if pasted { return }
+                // Fallback to normal send if paste failed
+            }
             _ = await ToolApprovalHandler.shared.sendMessage(text, to: target)
+        }
+    }
+
+    /// Write `text` to a temp file, load it into a tmux buffer, and paste with
+    /// bracketed paste so Claude CLI collapses it to "[Pasted text ...]".
+    /// Returns true on success.
+    private func sendViaBracketedPaste(tmuxPath: String, target: String, text: String) async -> Bool {
+        let bufferName = "claude-island-\(UUID().uuidString.prefix(8))"
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ci-paste-\(UUID().uuidString.prefix(8)).txt")
+        defer {
+            try? FileManager.default.removeItem(at: tempURL)
+        }
+        do {
+            try text.write(to: tempURL, atomically: true, encoding: .utf8)
+            // load-buffer -b <name> <file>
+            _ = try await ProcessExecutor.shared.run(
+                tmuxPath,
+                arguments: ["load-buffer", "-b", bufferName, tempURL.path]
+            )
+            // paste-buffer -p (bracketed paste) -d (delete buffer) -b <name> -t <target>
+            _ = try await ProcessExecutor.shared.run(
+                tmuxPath,
+                arguments: ["paste-buffer", "-p", "-d", "-b", bufferName, "-t", target]
+            )
+            // Give Claude CLI a beat to finish processing the bracketed paste
+            // before we send Enter to submit.
+            try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
+            _ = try await ProcessExecutor.shared.run(
+                tmuxPath,
+                arguments: ["send-keys", "-t", target, "Enter"]
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Send ESC key to the tmux pane to interrupt the current request
+    private func interruptSession() {
+        guard isProcessing else { return }
+
+        // Immediately hide processing indicator
+        localInterrupted = true
+
+        // Copy last user message to input box
+        if let lastUserItem = history.last(where: { item in
+            if case .user = item.type { return true }
+            return false
+        }), case .user(let text) = lastUserItem.type {
+            inputText = text
+        }
+
+        // Mark session as user-interrupted (red X indicator)
+        Task {
+            await SessionStore.shared.process(.interruptDetected(sessionId: sessionId))
+        }
+
+        // Send ESC to tmux
+        guard let tty = session.tty else { return }
+        Task {
+            if let target = await findTmuxTarget(tty: tty) {
+                guard let tmuxPath = await TmuxPathFinder.shared.getTmuxPath() else { return }
+                _ = try? await ProcessExecutor.shared.run(
+                    tmuxPath,
+                    arguments: ["send-keys", "-t", target.targetString, "Escape"]
+                )
+            }
         }
     }
 
@@ -614,7 +981,7 @@ struct UserMessageView: View {
                 .padding(.vertical, 10)
                 .background(
                     RoundedRectangle(cornerRadius: 18)
-                        .fill(Color.white.opacity(0.15))
+                        .fill(Color(red: 32/255, green: 32/255, blue: 32/255))
                 )
         }
     }
@@ -626,16 +993,18 @@ struct AssistantMessageView: View {
     let text: String
 
     var body: some View {
-        HStack(alignment: .top, spacing: 6) {
-            // White dot indicator
-            Circle()
-                .fill(Color.white.opacity(0.6))
-                .frame(width: 6, height: 6)
-                .padding(.top, 5)
+        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            HStack(alignment: .top, spacing: 6) {
+                // White dot indicator
+                Circle()
+                    .fill(Color.white.opacity(0.6))
+                    .frame(width: 6, height: 6)
+                    .padding(.top, 5)
 
-            MarkdownText(text, color: .white.opacity(0.9), fontSize: 13)
+                MarkdownText(text, color: .white.opacity(0.9), fontSize: 13)
 
-            Spacer(minLength: 60)
+                Spacer(minLength: 60)
+            }
         }
     }
 }
@@ -643,22 +1012,40 @@ struct AssistantMessageView: View {
 // MARK: - Processing Indicator
 
 struct ProcessingIndicatorView: View {
-    private let baseTexts = ["Processing", "Working"]
-    private let color = Color(red: 0.85, green: 0.47, blue: 0.34) // Claude orange
+    // Spinner verbs from Claude Code (src/constants/spinnerVerbs.ts)
+    static let verbs = [
+        "Accomplishing", "Architecting", "Baking", "Beaming", "Brewing",
+        "Calculating", "Cascading", "Cerebrating", "Churning", "Clauding",
+        "Coalescing", "Cogitating", "Composing", "Computing", "Concocting",
+        "Contemplating", "Cooking", "Crafting", "Creating", "Crunching",
+        "Crystallizing", "Cultivating", "Deciphering", "Deliberating",
+        "Enchanting", "Envisioning", "Fermenting", "Forging", "Generating",
+        "Harmonizing", "Hatching", "Ideating", "Imagining", "Improvising",
+        "Incubating", "Inferring", "Manifesting", "Marinating", "Mulling",
+        "Musing", "Noodling", "Orchestrating", "Percolating", "Pondering",
+        "Processing", "Puzzling", "Ruminating", "Simmering", "Sketching",
+        "Spinning", "Synthesizing", "Tempering", "Thinking", "Tinkering",
+        "Transmuting", "Vibing", "Wandering", "Weaving", "Working",
+    ]
+    private let baseColor = Color(red: 0.85, green: 0.47, blue: 0.34) // Claude orange
+    private let shimmerColor = Color(red: 1.0, green: 0.75, blue: 0.55) // Bright shimmer
     private let baseText: String
 
     @State private var dotCount: Int = 1
-    private let timer = Timer.publish(every: 0.4, on: .main, in: .common).autoconnect()
+    @State private var shimmerOffset: Int = 0
+    private let dotTimer = Timer.publish(every: 0.4, on: .main, in: .common).autoconnect()
+    private let shimmerTimer = Timer.publish(every: 0.06, on: .main, in: .common).autoconnect()
 
-    /// Use a turnId to select text consistently per user turn
-    init(turnId: String = "") {
-        // Use hash of turnId to pick base text consistently for this turn
-        let index = abs(turnId.hashValue) % baseTexts.count
-        baseText = baseTexts[index]
+    static func randomVerb() -> String {
+        verbs.randomElement() ?? "Working"
     }
 
-    private var dots: String {
-        String(repeating: ".", count: dotCount)
+    init(verb: String) {
+        baseText = verb
+    }
+
+    private var displayText: String {
+        baseText + String(repeating: ".", count: dotCount)
     }
 
     var body: some View {
@@ -666,14 +1053,34 @@ struct ProcessingIndicatorView: View {
             ProcessingSpinner()
                 .frame(width: 6)
 
-            Text(baseText + dots)
-                .font(.system(size: 13))
-                .foregroundColor(color)
+            shimmerText
 
             Spacer()
         }
-        .onReceive(timer) { _ in
+        .onReceive(dotTimer) { _ in
             dotCount = (dotCount % 3) + 1
+        }
+        .onReceive(shimmerTimer) { _ in
+            let textLen = displayText.count
+            let cycleLen = textLen + 10
+            shimmerOffset = (shimmerOffset + 1) % cycleLen
+        }
+    }
+
+    /// Text with a shimmer highlight sweeping right-to-left
+    private var shimmerText: some View {
+        let text = displayText
+        let chars = Array(text)
+        let glimmerPos = shimmerOffset
+
+        return HStack(spacing: 0) {
+            ForEach(Array(chars.enumerated()), id: \.offset) { index, char in
+                let dist = abs(index - glimmerPos)
+                let color: Color = dist <= 1 ? shimmerColor : baseColor
+                Text(String(char))
+                    .font(.system(size: 13))
+                    .foregroundColor(color)
+            }
         }
     }
 }
@@ -691,7 +1098,7 @@ struct ToolCallView: View {
     private var statusColor: Color {
         switch tool.status {
         case .running:
-            return Color.white
+            return Color.white.opacity(0.45)
         case .waitingForApproval:
             return Color.orange
         case .success:
@@ -718,13 +1125,13 @@ struct ToolCallView: View {
         tool.result != nil || tool.structuredResult != nil
     }
 
-    /// Whether the tool can be expanded (has result, NOT Task tools, NOT Edit tools)
+    /// Whether the tool can be expanded (has result, NOT Task tools)
     private var canExpand: Bool {
-        tool.name != "Task" && tool.name != "Edit" && hasResult
+        tool.name != "Task" && (hasResult || tool.name == "Edit")
     }
 
     private var showContent: Bool {
-        tool.name == "Edit" || isExpanded
+        isExpanded
     }
 
     private var agentDescription: String? {
@@ -738,10 +1145,11 @@ struct ToolCallView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
+            HStack(alignment: .top, spacing: 6) {
                 Circle()
                     .fill(statusColor.opacity(tool.status == .running || tool.status == .waitingForApproval ? pulseOpacity : 0.6))
                     .frame(width: 6, height: 6)
+                    .padding(.top, 5)
                     .id(tool.status)  // Forces view recreation, cancelling repeatForever animation
                     .onAppear {
                         if tool.status == .running || tool.status == .waitingForApproval {
@@ -749,15 +1157,26 @@ struct ToolCallView: View {
                         }
                     }
 
-                // Tool name (formatted for MCP tools)
-                Text(MCPToolFormatter.formatToolName(tool.name))
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(textColor)
-                    .fixedSize()
+                // Unified format: ToolName(primary_arg) — matches Claude CLI style
+                let header = toolHeaderDisplay(expanded: isExpanded)
+                HStack(alignment: .top, spacing: 0) {
+                    Text(header.name)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(textColor)
+                        .fixedSize()
+                    if let arg = header.arg, !arg.isEmpty {
+                        Text("(\(arg))")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundColor(textColor.opacity(0.75))
+                            .lineLimit(isExpanded ? nil : 1)
+                            .truncationMode(.tail)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
 
+                // Supplemental inline text (Task subagent count, agent desc)
                 if tool.name == "Task" && !tool.subagentTools.isEmpty {
-                    let taskDesc = tool.input["description"] ?? "Running agent..."
-                    Text("\(taskDesc) (\(tool.subagentTools.count) tools)")
+                    Text("(\(tool.subagentTools.count) tools)")
                         .font(.system(size: 11))
                         .foregroundColor(textColor.opacity(0.7))
                         .lineLimit(1)
@@ -769,24 +1188,12 @@ struct ToolCallView: View {
                         .foregroundColor(textColor.opacity(0.7))
                         .lineLimit(1)
                         .truncationMode(.tail)
-                } else if MCPToolFormatter.isMCPTool(tool.name) && !tool.input.isEmpty {
-                    Text(MCPToolFormatter.formatArgs(tool.input))
-                        .font(.system(size: 11))
-                        .foregroundColor(textColor.opacity(0.7))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                } else {
-                    Text(tool.statusDisplay.text)
-                        .font(.system(size: 11))
-                        .foregroundColor(textColor.opacity(0.7))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
                 }
 
                 Spacer()
 
-                // Expand indicator (only for expandable tools)
-                if canExpand && tool.status != .running && tool.status != .waitingForApproval {
+                // Expand indicator. Edit shows even while running (diff available from input).
+                if canExpand && (tool.status != .running || tool.name == "Edit") && tool.status != .waitingForApproval {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .medium))
                         .foregroundColor(.white.opacity(0.3))
@@ -802,6 +1209,8 @@ struct ToolCallView: View {
                     .padding(.top, 2)
             }
 
+
+
             // Result content (Edit always shows, others when expanded)
             // Edit tools bypass hasResult check - fallback in ToolResultContent renders from input params
             if showContent && tool.status != .running && tool.name != "Task" && (hasResult || tool.name == "Edit") {
@@ -811,19 +1220,22 @@ struct ToolCallView: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
-            // Edit tools show diff from input even while running
-            if tool.name == "Edit" && tool.status == .running {
+            // Edit tools show diff from input while running (only when expanded)
+            if tool.name == "Edit" && tool.status == .running && isExpanded {
                 EditInputDiffView(input: tool.input)
                     .padding(.leading, 12)
                     .padding(.top, 4)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
         .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(canExpand && isHovering ? Color.white.opacity(0.05) : Color.clear)
+            RoundedRectangle(cornerRadius: 8)
+                .fill(canExpand && isHovering ? Color.white.opacity(0.04) : Color.clear)
+                .animation(.easeOut(duration: 0.12), value: isHovering)
         )
-        .contentShape(Rectangle())
+        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .pointerStyle(canExpand ? .link : .default)
         .onHover { hovering in
             isHovering = hovering
         }
@@ -846,6 +1258,84 @@ struct ToolCallView: View {
             pulseOpacity = 0.15
         }
     }
+
+    /// Build the "ToolName(arg)" header display.
+    /// When expanded=true, the arg is shown in full (no truncation).
+    private func toolHeaderDisplay(expanded: Bool = false) -> (name: String, arg: String?) {
+        let name = MCPToolFormatter.formatToolName(tool.name)
+        switch tool.name {
+        case "Bash":
+            if let cmd = tool.input["command"], !cmd.isEmpty {
+                if expanded { return ("Bash", cmd) }
+                let first = cmd.components(separatedBy: "\n").first ?? cmd
+                return ("Bash", first)
+            }
+        case "Read", "Edit", "Write":
+            if let path = tool.input["file_path"], !path.isEmpty {
+                return (tool.name, Self.shortenPath(path))
+            }
+        case "Grep":
+            if let pattern = tool.input["pattern"], !pattern.isEmpty {
+                return ("Grep", pattern)
+            }
+        case "Glob":
+            if let pattern = tool.input["pattern"], !pattern.isEmpty {
+                return ("Glob", pattern)
+            }
+        case "WebSearch":
+            if let query = tool.input["query"], !query.isEmpty {
+                return ("WebSearch", query)
+            }
+        case "WebFetch":
+            if let url = tool.input["url"], !url.isEmpty {
+                return ("WebFetch", url)
+            }
+        case "Task":
+            if let desc = tool.input["description"], !desc.isEmpty {
+                return ("Task", desc)
+            }
+        case "TodoWrite":
+            return ("TodoWrite", nil)
+        default:
+            if MCPToolFormatter.isMCPTool(tool.name) && !tool.input.isEmpty {
+                return (name, MCPToolFormatter.formatArgs(tool.input))
+            }
+        }
+        return (name, nil)
+    }
+
+    /// Shorten a file path: last 2 segments.
+    private static func shortenPath(_ path: String) -> String {
+        let parts = path.split(separator: "/")
+        if parts.count <= 2 { return path }
+        return parts.suffix(2).joined(separator: "/")
+    }
+
+    /// Single-line summary of the tool's result (shown below with └ prefix).
+    private func toolSummary() -> String? {
+        let status = tool.statusDisplay.text
+        switch tool.name {
+        case "Bash":
+            // Show first non-empty output line as compact summary
+            if case .bash(let r) = tool.structuredResult, r.hasOutput {
+                let firstLine = r.displayOutput
+                    .components(separatedBy: "\n")
+                    .first { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                return firstLine
+            }
+            if let raw = tool.result, !raw.isEmpty {
+                return raw.components(separatedBy: "\n")
+                    .first { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            }
+            return nil
+        case "Read", "Edit", "Write", "Grep", "Glob", "WebSearch", "WebFetch":
+            if status.isEmpty || status == "Completed" { return nil }
+            return status
+        default:
+            return status.isEmpty ? nil : status
+        }
+    }
+
 }
 
 // MARK: - Subagent Views
@@ -990,6 +1480,12 @@ struct ThinkingView: View {
     }
 
     var body: some View {
+        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            thinkingContent
+        }
+    }
+
+    private var thinkingContent: some View {
         HStack(alignment: .top, spacing: 6) {
             Circle()
                 .fill(Color.gray.opacity(0.5))
@@ -1219,5 +1715,53 @@ struct NewMessagesIndicator: View {
                 isHovering = hovering
             }
         }
+    }
+}
+
+// MARK: - Send Button
+
+private struct SendButton: View {
+    let enabled: Bool
+    let action: () -> Void
+    @State private var isHovered = false
+    @State private var isPressed = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.up.circle.fill")
+                .font(.system(size: 28))
+                .foregroundColor(foreground)
+                .scaleEffect(scale)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .pointerStyle(enabled ? .link : .default)
+        .onHover { hovering in
+            withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
+                isHovered = hovering
+            }
+        }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    if enabled, !isPressed {
+                        withAnimation(.easeOut(duration: 0.08)) { isPressed = true }
+                    }
+                }
+                .onEnded { _ in
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.6)) { isPressed = false }
+                }
+        )
+    }
+
+    private var foreground: Color {
+        if !enabled { return .white.opacity(0.2) }
+        return isHovered ? .white : .white.opacity(0.9)
+    }
+
+    private var scale: CGFloat {
+        if !enabled { return 1.0 }
+        if isPressed { return 0.88 }
+        return isHovered ? 1.08 : 1.0
     }
 }
