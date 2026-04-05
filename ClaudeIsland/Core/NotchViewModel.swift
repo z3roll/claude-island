@@ -395,8 +395,12 @@ class NotchViewModel: ObservableObject {
     }
 
     func toggleMenu() {
-        suppressHoverCloseAfterContentSwitch()
-        contentType = contentType == .menu ? .instances : .menu
+        if contentType == .menu {
+            showInstances()
+        } else {
+            suppressHoverCloseAfterContentSwitch()
+            contentType = .menu
+        }
     }
 
     func showMenu() {
@@ -405,7 +409,10 @@ class NotchViewModel: ObservableObject {
     }
 
     func showInstances() {
-        if contentType == .menu {
+        // Any transition *into* .instances from another page can shrink the
+        // panel out from under the cursor. Disable vertical hover bounds
+        // until the cursor next enters the new (smaller) panel.
+        if contentType != .instances {
             ignoresVerticalHoverBoundsUntilNextClick = true
         }
         suppressHoverCloseAfterContentSwitch()
@@ -431,7 +438,7 @@ class NotchViewModel: ObservableObject {
     /// Go back to instances list and clear saved chat state
     func exitChat() {
         currentChatSessionId = nil
-        contentType = .instances
+        showInstances()
     }
 
     private func suppressHoverCloseAfterContentSwitch() {
