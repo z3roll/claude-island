@@ -52,19 +52,22 @@ struct MarkdownText: View {
     }
 
     var body: some View {
-        let children = Array(document.children)
-        if children.isEmpty {
-            // Fallback for empty parse result
-            SwiftUI.Text(text)
-                .foregroundColor(baseColor)
-                .font(.system(size: fontSize))
-        } else {
-            VStack(alignment: .leading, spacing: 12) {
-                ForEach(Array(children.enumerated()), id: \.offset) { _, child in
-                    BlockRenderer(markup: child, baseColor: baseColor, fontSize: fontSize)
+        Group {
+            let children = Array(document.children)
+            if children.isEmpty {
+                // Fallback for empty parse result
+                SwiftUI.Text(text)
+                    .foregroundColor(baseColor)
+                    .font(.system(size: fontSize))
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(Array(children.enumerated()), id: \.offset) { _, child in
+                        BlockRenderer(markup: child, baseColor: baseColor, fontSize: fontSize)
+                    }
                 }
             }
         }
+        .textSelection(.enabled)
     }
 }
 
@@ -99,9 +102,57 @@ private struct BlockRenderer: View {
             Divider()
                 .background(baseColor.opacity(0.3))
                 .padding(.vertical, 4)
+        } else if let table = markup as? Markdown.Table {
+            tableView(table)
         } else {
             EmptyView()
         }
+    }
+
+    @ViewBuilder
+    private func tableView(_ table: Markdown.Table) -> some View {
+        let headerCells = Array(table.head.cells)
+        let rows = Array(table.body.rows)
+        VStack(alignment: .leading, spacing: 0) {
+            // Header row
+            tableRow(cells: headerCells, isHeader: true)
+            // Separator
+            Rectangle()
+                .fill(baseColor.opacity(0.25))
+                .frame(height: 1)
+            // Body rows
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                tableRow(cells: Array(row.cells), isHeader: false)
+            }
+        }
+        .padding(.vertical, 2)
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(baseColor.opacity(0.15), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+
+    @ViewBuilder
+    private func tableRow(cells: [Markdown.Table.Cell], isHeader: Bool) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(Array(cells.enumerated()), id: \.offset) { i, cell in
+                if i > 0 {
+                    Rectangle()
+                        .fill(baseColor.opacity(0.15))
+                        .frame(width: 1)
+                }
+                let inline = Array(cell.inlineChildren)
+                let text = InlineRenderer(children: inline, baseColor: baseColor, fontSize: fontSize - 1).asText()
+                (isHeader ? text.bold() : text)
+                    .foregroundColor(baseColor.opacity(isHeader ? 1.0 : 0.85))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .background(isHeader ? baseColor.opacity(0.08) : Color.clear)
     }
 
     @ViewBuilder

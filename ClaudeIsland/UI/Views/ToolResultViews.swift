@@ -713,13 +713,12 @@ struct FileCodeView: View {
         let isLast: Bool
 
         var body: some View {
-            HStack(spacing: 0) {
+            HStack(spacing: 8) {
                 // Line number
                 Text("\(lineNumber)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.white.opacity(0.3))
-                    .frame(width: 28, alignment: .trailing)
-                    .padding(.trailing, 8)
+                    .frame(minWidth: 18, alignment: .trailing)
 
                 // Line content
                 Text(line.isEmpty ? " " : line)
@@ -728,7 +727,7 @@ struct FileCodeView: View {
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.trailing, 4)
+            .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(Color.white.opacity(0.06))
             .clipShape(RoundedCorner(radius: 6, corners: isLast ? [.bottomLeft, .bottomRight] : []))
@@ -1044,19 +1043,17 @@ struct SimpleDiffView: View {
         }
 
         var body: some View {
-            HStack(spacing: 0) {
+            HStack(spacing: 4) {
                 // Line number
                 Text("\(lineNumber)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(type.textColor.opacity(0.6))
-                    .frame(width: 28, alignment: .trailing)
-                    .padding(.trailing, 4)
+                    .frame(minWidth: 18, alignment: .trailing)
 
                 // +/- indicator
                 Text(type == .added ? "+" : "-")
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundColor(type.textColor)
-                    .frame(width: 14)
 
                 // Line content
                 Text(line.isEmpty ? " " : line)
@@ -1065,7 +1062,7 @@ struct SimpleDiffView: View {
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.trailing, 4)
+            .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(type.backgroundColor)
             .clipShape(RoundedCorner(radius: 6, corners: corners))

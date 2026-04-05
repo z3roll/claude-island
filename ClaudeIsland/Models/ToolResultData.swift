@@ -264,6 +264,10 @@ struct ToolStatusDisplay {
     let text: String
     let isRunning: Bool
 
+    func withRunning(_ value: Bool) -> ToolStatusDisplay {
+        ToolStatusDisplay(text: text, isRunning: value)
+    }
+
     /// Get running status text for a tool
     static func running(for toolName: String, input: [String: String]) -> ToolStatusDisplay {
         switch toolName {
@@ -276,6 +280,11 @@ struct ToolStatusDisplay {
         case "Bash":
             if let desc = input["description"], !desc.isEmpty {
                 return ToolStatusDisplay(text: desc, isRunning: true)
+            }
+            if let cmd = input["command"], !cmd.isEmpty {
+                let truncated = cmd.components(separatedBy: "\n").first ?? cmd
+                let display = truncated.count > 60 ? String(truncated.prefix(57)) + "..." : truncated
+                return ToolStatusDisplay(text: "$ \(display)", isRunning: true)
             }
             return ToolStatusDisplay(text: "Running...", isRunning: true)
         case "Grep", "Glob":
@@ -307,9 +316,15 @@ struct ToolStatusDisplay {
     }
 
     /// Get completed status text for a tool result
-    static func completed(for toolName: String, result: ToolResultData?) -> ToolStatusDisplay {
+    static func completed(for toolName: String, result: ToolResultData?, input: [String: String] = [:]) -> ToolStatusDisplay {
         guard let result = result else {
-            return ToolStatusDisplay(text: "Completed", isRunning: false)
+            // No structured result — show command for Bash, else fall back to running text.
+            if toolName == "Bash", let cmd = input["command"], !cmd.isEmpty {
+                let firstLine = cmd.components(separatedBy: "\n").first ?? cmd
+                let truncated = firstLine.count > 60 ? String(firstLine.prefix(57)) + "..." : firstLine
+                return ToolStatusDisplay(text: "$ \(truncated)", isRunning: false)
+            }
+            return running(for: toolName, input: input).withRunning(false)
         }
 
         switch result {
@@ -328,10 +343,19 @@ struct ToolStatusDisplay {
             if let bgId = r.backgroundTaskId {
                 return ToolStatusDisplay(text: "Running in background (\(bgId))", isRunning: false)
             }
+            // Always show the command; append interpretation if available.
+            let cmdText: String = {
+                if let cmd = input["command"], !cmd.isEmpty {
+                    let firstLine = cmd.components(separatedBy: "\n").first ?? cmd
+                    let truncated = firstLine.count > 60 ? String(firstLine.prefix(57)) + "..." : firstLine
+                    return "$ \(truncated)"
+                }
+                return "Completed"
+            }()
             if let interpretation = r.returnCodeInterpretation {
-                return ToolStatusDisplay(text: interpretation, isRunning: false)
+                return ToolStatusDisplay(text: "\(cmdText) — \(interpretation)", isRunning: false)
             }
-            return ToolStatusDisplay(text: "Completed", isRunning: false)
+            return ToolStatusDisplay(text: cmdText, isRunning: false)
 
         case .grep(let r):
             let fileWord = r.numFiles == 1 ? "file" : "files"
