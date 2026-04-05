@@ -39,45 +39,83 @@ class TokenUsageService: ObservableObject {
     @Published private(set) var usage5h = TokenWindowUsage.zero
     @Published private(set) var usage7d = TokenWindowUsage.zero
 
-    private var timer: Timer?
-    private let cachePath: String
+    private var cancellable: AnyCancellable?
 
     private init() {
-        cachePath = (NSTemporaryDirectory() as NSString).appendingPathComponent("claude-usage-cache.json")
         refresh()
-        // Re-read the cache file every 30 seconds
-        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        // Observe session metadata changes — 5h/7d derive from it directly.
+        cancellable = SessionMetadataService.shared.$metadata
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.refresh() }
+            }
+        // Clear immediately on hook uninstall.
+        NotificationCenter.default.addObserver(
+            forName: .claudeIslandHooksUninstalled,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.usage5h = .zero
+                self?.usage7d = .zero
+            }
+        }
+        // Re-read from newest session file on hook install.
+        NotificationCenter.default.addObserver(
+            forName: .claudeIslandHooksInstalled,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
     }
 
     func refresh() {
-        guard let data = FileManager.default.contents(atPath: cachePath),
+        // Read from the MOST RECENTLY UPDATED session cache file.
+        // Sessions that have been idle for a long time have stale metadata, so
+        // sorting by file mtime gives us the freshest account-level 5h/7d data.
+        let fm = FileManager.default
+        let tmpDir = NSTemporaryDirectory()
+        guard let contents = try? fm.contentsOfDirectory(atPath: tmpDir) else {
+            return // Keep previous values
+        }
+        let candidates = contents.filter {
+            $0.hasPrefix("claude-island-session-") && $0.hasSuffix(".json")
+        }
+        guard !candidates.isEmpty else { return }
+
+        // Find file with the most recent mtime
+        var newest: (path: String, mtime: Date)?
+        for filename in candidates {
+            let path = (tmpDir as NSString).appendingPathComponent(filename)
+            if let attrs = try? fm.attributesOfItem(atPath: path),
+               let mtime = attrs[.modificationDate] as? Date {
+                if newest == nil || mtime > newest!.mtime {
+                    newest = (path, mtime)
+                }
+            }
+        }
+
+        guard let newest,
+              let data = fm.contents(atPath: newest.path),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return
         }
 
-        if let fiveHour = json["five_hour"] as? [String: Any] {
-            usage5h = parseWindow(fiveHour)
+        let pct5h = json["five_hour_pct"] as? Double
+        let resets5h = (json["five_hour_resets_at"] as? Int).map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        let pct7d = json["seven_day_pct"] as? Double
+        let resets7d = (json["seven_day_resets_at"] as? Int).map { Date(timeIntervalSince1970: TimeInterval($0)) }
+
+        // Only update if newer values are available; keep previous otherwise.
+        if let pct = pct5h {
+            let new = TokenWindowUsage(utilization: pct, resetsAt: resets5h)
+            if usage5h != new { usage5h = new }
         }
-        if let sevenDay = json["seven_day"] as? [String: Any] {
-            usage7d = parseWindow(sevenDay)
+        if let pct = pct7d {
+            let new = TokenWindowUsage(utilization: pct, resetsAt: resets7d)
+            if usage7d != new { usage7d = new }
         }
     }
 
-    private func parseWindow(_ dict: [String: Any]) -> TokenWindowUsage {
-        let utilization = dict["utilization"] as? Double ?? 0
-        var resetsAt: Date?
-        if let resetsStr = dict["resets_at"] as? String {
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            resetsAt = formatter.date(from: resetsStr)
-            // Try without fractional seconds if that fails
-            if resetsAt == nil {
-                formatter.formatOptions = [.withInternetDateTime]
-                resetsAt = formatter.date(from: resetsStr)
-            }
-        }
-        return TokenWindowUsage(utilization: utilization, resetsAt: resetsAt)
-    }
 }

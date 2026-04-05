@@ -13,8 +13,30 @@ import os.log
 /// Metadata for a single session, extracted from statusLine cache files
 struct SessionMetadata: Equatable {
     let model: String?
+    let modelId: String?
     let contextPercentage: Double?
     let contextWindowSize: Int?
+
+    // Token breakdown (current usage)
+    let inputTokens: Int?
+    let outputTokens: Int?
+    let cacheCreationTokens: Int?
+    let cacheReadTokens: Int?
+
+    // Cost & timing
+    let totalCostUSD: Double?
+    let totalDurationMs: Int?
+    let totalApiDurationMs: Int?
+
+    // Code stats
+    let linesAdded: Int?
+    let linesRemoved: Int?
+
+    // Rate limits
+    let fiveHourPercentage: Double?
+    let fiveHourResetsAt: Int?   // unix timestamp
+    let sevenDayPercentage: Double?
+    let sevenDayResetsAt: Int?   // unix timestamp
 }
 
 @MainActor
@@ -69,12 +91,24 @@ final class SessionMetadataService: ObservableObject {
                 if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let sessionId = json["session_id"] as? String {
                     let model = json["model"] as? String
-                    let ctxPct = json["context_pct"] as? Double ?? json["context_percentage"] as? Double
-                    let ctxSize = json["context_size"] as? Int ?? json["context_window_size"] as? Int
                     newMetadata[sessionId] = SessionMetadata(
                         model: (model?.isEmpty ?? true) ? nil : model,
-                        contextPercentage: ctxPct,
-                        contextWindowSize: ctxSize
+                        modelId: json["model_id"] as? String,
+                        contextPercentage: json["context_pct"] as? Double ?? json["context_percentage"] as? Double,
+                        contextWindowSize: json["context_size"] as? Int ?? json["context_window_size"] as? Int,
+                        inputTokens: json["input_tokens"] as? Int,
+                        outputTokens: json["output_tokens"] as? Int,
+                        cacheCreationTokens: json["cache_creation_tokens"] as? Int,
+                        cacheReadTokens: json["cache_read_tokens"] as? Int,
+                        totalCostUSD: json["total_cost_usd"] as? Double,
+                        totalDurationMs: json["total_duration_ms"] as? Int,
+                        totalApiDurationMs: json["total_api_duration_ms"] as? Int,
+                        linesAdded: json["lines_added"] as? Int,
+                        linesRemoved: json["lines_removed"] as? Int,
+                        fiveHourPercentage: json["five_hour_pct"] as? Double,
+                        fiveHourResetsAt: json["five_hour_resets_at"] as? Int,
+                        sevenDayPercentage: json["seven_day_pct"] as? Double,
+                        sevenDayResetsAt: json["seven_day_resets_at"] as? Int
                     )
                 }
             } catch {

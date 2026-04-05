@@ -12,9 +12,15 @@ struct TokenUsageBadge: View {
     @ObservedObject private var tokenService = TokenUsageService.shared
 
     var body: some View {
-        HStack(spacing: 5) {
-            windowPill(label: "5h", usage: tokenService.usage5h)
-            windowPill(label: "7d", usage: tokenService.usage7d)
+        if tokenService.usage5h != .zero || tokenService.usage7d != .zero {
+            HStack(spacing: 5) {
+                if tokenService.usage5h != .zero {
+                    windowPill(label: "5h", usage: tokenService.usage5h)
+                }
+                if tokenService.usage7d != .zero {
+                    windowPill(label: "7d", usage: tokenService.usage7d)
+                }
+            }
         }
     }
 
