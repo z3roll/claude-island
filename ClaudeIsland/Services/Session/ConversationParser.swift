@@ -361,7 +361,18 @@ actor ConversationParser {
         var newMessages: [ChatMessage] = []
 
         for line in lines where !line.isEmpty {
-            if line.contains("<command-name>/clear</command-name>") {
+            // Only treat this as a /clear command if it's a genuine user
+            // command line: `type:"user"` with a STRING content that starts
+            // with the command marker. A tool_result that happens to quote
+            // this string (e.g. an Edit diff of ConversationParser.swift
+            // itself) would otherwise wipe the whole history.
+            if line.contains("<command-name>/clear</command-name>"),
+               let lineData = line.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+               (json["type"] as? String) == "user",
+               let message = json["message"] as? [String: Any],
+               let contentStr = message["content"] as? String,
+               contentStr.hasPrefix("<command-name>/clear</command-name>") {
                 state.messages = []
                 state.seenToolIds = []
                 state.toolIdToName = [:]
