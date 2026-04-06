@@ -547,12 +547,19 @@ struct NotchView: View {
     }
 
     private func updatePanelFrame(_ geo: GeometryProxy) {
+        // geo.frame(in: .global) is in WINDOW coordinates (origin at window
+        // top-left, Y down). We need to convert to macOS global screen
+        // coordinates (origin at bottom-left of primary screen, Y up) so
+        // hover detection with NSEvent.mouseLocation works on any screen.
         let localFrame = geo.frame(in: .global)
-        guard let screen = NSScreen.main else { return }
-        let screenHeight = screen.frame.height
+        let sr = viewModel.screenRect
+        let wh = viewModel.windowHeight
+        // Window is full-width, pinned to the top of the target screen.
+        let windowOriginX = sr.origin.x
+        let windowOriginY = sr.maxY - wh
         let screenFrame = CGRect(
-            x: localFrame.origin.x,
-            y: screenHeight - localFrame.origin.y - localFrame.height,
+            x: windowOriginX + localFrame.origin.x,
+            y: windowOriginY + (wh - localFrame.origin.y - localFrame.height),
             width: localFrame.width,
             height: localFrame.height
         )
