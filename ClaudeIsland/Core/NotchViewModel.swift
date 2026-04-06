@@ -48,6 +48,7 @@ class NotchViewModel: ObservableObject {
 
     private enum HoverBehavior {
         static let closeDelay: TimeInterval = 0.18
+        static let clickOpenCloseDelay: TimeInterval = 0.6
         static let openedHitPaddingX: CGFloat = 10
         static let openedHitPaddingY: CGFloat = 10
         static let menuHitPaddingY: CGFloat = 40
@@ -257,17 +258,22 @@ class NotchViewModel: ObservableObject {
                 notchOpen(reason: .hover)
             }
         } else {
-            // Auto-close when mouse leaves (only for hover-opened, not click-opened).
-            // Use a short delay so small hit-test gaps while moving inside the menu
-            // don't close the panel before the cursor reaches lower rows like Quit.
-            if status == .opened && openReason == .hover {
+            // Auto-close when mouse leaves.
+            // For hover-opened: short delay (avoids flicker from hit-test gaps).
+            // For click/notification/unknown: longer delay as safety net — if the
+            // user moves the mouse away without clicking outside, the panel should
+            // still eventually close rather than freeze the screen.
+            if status == .opened {
                 guard Date() >= hoverCloseSuppressedUntil else { return }
+                let delay = openReason == .hover
+                    ? HoverBehavior.closeDelay
+                    : HoverBehavior.clickOpenCloseDelay
                 let closeWorkItem = DispatchWorkItem { [weak self] in
-                    guard let self, !self.isHovering, self.status == .opened, self.openReason == .hover else { return }
+                    guard let self, !self.isHovering, self.status == .opened else { return }
                     self.notchClose()
                 }
                 hoverTimer = closeWorkItem
-                DispatchQueue.main.asyncAfter(deadline: .now() + HoverBehavior.closeDelay, execute: closeWorkItem)
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: closeWorkItem)
             }
         }
     }
