@@ -28,7 +28,6 @@ struct ChatView: View {
     @State private var isBottomVisible: Bool = true
     @State private var localInterrupted: Bool = false
     @State private var currentSpinnerVerb: String = ""
-    @State private var gitBranch: String = ""
     @State private var loadedItemCount: Int = 0
     @State private var hasMoreHistory: Bool = false
     @State private var isLoadingMore: Bool = false
@@ -140,19 +139,6 @@ struct ChatView: View {
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: isWaitingForApproval)
         .animation(nil, value: viewModel.status)
-        .task(id: session.cwd) {
-            // Keep git branch in sync by polling while the chat view is visible.
-            // Cancelled automatically when cwd changes or view disappears.
-            let cwd = session.cwd
-            let initial = await Self.getGitBranch(cwd: cwd)
-            if !Task.isCancelled { gitBranch = initial }
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
-                if Task.isCancelled { break }
-                let next = await Self.getGitBranch(cwd: cwd)
-                if !Task.isCancelled, next != gitBranch { gitBranch = next }
-            }
-        }
         .task {
             // Pick spinner verb if already processing when chat opens
             if isProcessing && currentSpinnerVerb.isEmpty {
@@ -240,11 +226,9 @@ struct ChatView: View {
             if let updated = sessions.first(where: { $0.sessionId == sessionId }),
                updated != session {
                 // Refresh git branch if cwd changed
-                let cwdChanged = updated.cwd != session.cwd
                 // Check if permission was just accepted (transition from waitingForApproval to processing)
                 let wasWaiting = isWaitingForApproval
                 session = updated
-                _ = cwdChanged  // handled by .task(id: session.cwd)
                 let isNowProcessing = updated.phase == .processing
 
                 // Pick a spinner verb if processing and no verb set yet
@@ -563,7 +547,8 @@ struct ChatView: View {
                 .foregroundColor(Color(red: 0.4, green: 0.8, blue: 0.85).opacity(0.7))
                 .lineLimit(1)
 
-            // Git branch (purple)
+            // Git branch (purple) — read from statusLine cache, updated on every hook event
+            let gitBranch = metadataService.metadata[sessionId]?.gitBranch ?? ""
             if !gitBranch.isEmpty {
                 Image(systemName: "arrow.triangle.branch")
                     .font(.system(size: 9))
@@ -579,26 +564,6 @@ struct ChatView: View {
         .padding(.leading, 6)
         .padding(.top, 0)
         .padding(.bottom, 2)
-    }
-
-    private static func getGitBranch(cwd: String) async -> String {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"]
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        process.environment = ["GIT_OPTIONAL_LOCKS": "0"]
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return "" }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        } catch {
-            return ""
-        }
     }
 
     // MARK: - Input Bar

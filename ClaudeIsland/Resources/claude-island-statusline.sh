@@ -20,9 +20,16 @@ if command -v jq &>/dev/null && [ -n "$INPUT" ]; then
         }
     }' > "${TMPDIR}claude-usage-cache.json" 2>/dev/null
 
+    # Get git branch from cwd (fast, ~5ms)
+    _CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
+    _GIT_BRANCH=""
+    if [ -n "$_CWD" ]; then
+        _GIT_BRANCH=$(GIT_OPTIONAL_LOCKS=0 git -C "$_CWD" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    fi
+
     _SID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
     if [ -n "$_SID" ]; then
-        echo "$INPUT" | jq -c '{
+        echo "$INPUT" | jq -c --arg branch "$_GIT_BRANCH" '{
             session_id,
             model: .model.display_name,
             model_id: .model.id,
@@ -40,7 +47,8 @@ if command -v jq &>/dev/null && [ -n "$INPUT" ]; then
             five_hour_pct: .rate_limits.five_hour.used_percentage,
             five_hour_resets_at: .rate_limits.five_hour.resets_at,
             seven_day_pct: .rate_limits.seven_day.used_percentage,
-            seven_day_resets_at: .rate_limits.seven_day.resets_at
+            seven_day_resets_at: .rate_limits.seven_day.resets_at,
+            git_branch: $branch
         }' > "${TMPDIR}claude-island-session-${_SID}.json" 2>/dev/null
     fi
 fi

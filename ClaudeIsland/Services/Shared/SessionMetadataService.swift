@@ -37,6 +37,9 @@ struct SessionMetadata: Equatable {
     let fiveHourResetsAt: Int?   // unix timestamp
     let sevenDayPercentage: Double?
     let sevenDayResetsAt: Int?   // unix timestamp
+
+    // Git
+    let gitBranch: String?
 }
 
 @MainActor
@@ -108,7 +111,8 @@ final class SessionMetadataService: ObservableObject {
                         fiveHourPercentage: json["five_hour_pct"] as? Double,
                         fiveHourResetsAt: json["five_hour_resets_at"] as? Int,
                         sevenDayPercentage: json["seven_day_pct"] as? Double,
-                        sevenDayResetsAt: json["seven_day_resets_at"] as? Int
+                        sevenDayResetsAt: json["seven_day_resets_at"] as? Int,
+                        gitBranch: json["git_branch"] as? String
                     )
                 }
             } catch {
