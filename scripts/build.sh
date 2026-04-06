@@ -41,8 +41,16 @@ codesign --force --deep --sign - "$APP_PATH" 2>&1 | tail -5
 codesign --verify --deep --strict "$APP_PATH" && echo "Signature OK"
 
 echo ""
+echo "=== Installing to /Applications ==="
+pkill -f "Claude Island" 2>/dev/null || true
+sleep 0.3
+rm -rf "/Applications/Claude Island.app"
+cp -R "$APP_PATH" "/Applications/Claude Island.app"
+echo "Installed to /Applications/Claude Island.app"
+
+echo ""
 echo "=== Build Complete ==="
 echo "App: $APP_PATH"
 echo ""
-echo "  Install:  cp -r \"$APP_PATH\" /Applications/"
+echo "  Launch:   open '/Applications/Claude Island.app'"
 echo "  Release:  ./scripts/release.sh <version>"
