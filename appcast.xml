@@ -63,6 +63,15 @@
 
 ### Fixes
 
+- Fix panel disappearing when returning to the main list via two-finger
+  swipe-back (from chat or menu): the hover-bounds grace is now applied
+  on every transition into the instances page, matching the page-dot
+  click behaviour.
+- Fix chat view showing stale history while the main page already shows
+  a newer message: entering chat now always re-syncs from JSONL instead
+  of trusting the in-memory cache.
+- Fix git branch in the chat header not updating when you `git checkout`
+  another branch while the chat stays open.
 - Fix tool results staying empty after PostToolUse: JSONL sync now fills
   `result` / `structuredResult` on tools already marked `.success`.
 - Fix 5h/7d badge not clearing after uninstalling hooks.
@@ -77,16 +86,17 @@
 
 - CPU-based interrupt detection (10s idle threshold) removed.
 - Boot animation (notch briefly expanded on launch) removed.
-- Hooks on/off toggle remains but no longer clears old in-memory state]]></description>
-            <pubDate>Mon, 06 Apr 2026 00:56:08 +0800</pubDate>
-            <sparkle:version>1.4</sparkle:version>
+- Hooks on/off toggle remains but no longer clears old in-memory state
+  aggressively; external tool interop is smoother.]]></description>
+            <pubDate>Mon, 06 Apr 2026 04:56:34 +0800</pubDate>
+            <sparkle:version>73</sparkle:version>
             <sparkle:shortVersionString>1.4</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure
                 url="https://github.com/z3roll/claude-island/releases/download/v1.4/ClaudeIsland-v1.4.zip"
                 type="application/octet-stream"
-                sparkle:edSignature="gAOYlh8EsV38hZPj9nRLdgfTPuQaW7LhdXQ0b7jyVtJm5+zdO2LHfPfcXBVJ1U8HaGVuXbiBNPaQEeOuvJdoCA=="
-                length="4033576"
+                sparkle:edSignature="ERnZ1CpELEQpzBYq766COFI7NZ9Am4OhCwSEpyzqRXDuJb/dgccdj2Rli9h1fmVS8TlRFyl4LjibsXGYR9C1CA=="
+                length="4009635"
             />
         </item>
     </channel>

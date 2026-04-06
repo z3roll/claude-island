@@ -5,6 +5,7 @@
 //  Custom Sparkle user driver for in-notch update UI
 //
 
+import AppKit
 import Combine
 import Foundation
 import Sparkle
@@ -130,8 +131,11 @@ class UpdateManager: NSObject, ObservableObject {
     }
 
     func readyToInstall(installHandler: @escaping (SPUUserUpdateChoice) -> Void) {
-        self.installHandler = installHandler
-        self.state = .readyToInstall(version: currentVersion)
+        // User already consented to install by tapping "Download Update".
+        // Don't make them click a second time — just proceed with install.
+        self.installHandler = nil
+        self.state = .installing
+        installHandler(.install)
     }
 
     func installing() {
@@ -258,6 +262,10 @@ class NotchUserDriver: NSObject, SPUUserDriver {
     func showInstallingUpdate(withApplicationTerminated applicationTerminated: Bool, retryTerminatingApplication: @escaping () -> Void) {
         Task { @MainActor in
             UpdateManager.shared.installing()
+            if !applicationTerminated {
+                // Sparkle needs the app dead before it can swap the bundle.
+                NSApplication.shared.terminate(nil)
+            }
         }
     }
 
