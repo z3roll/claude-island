@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.5.0 — 2026-04-09
+
+### Features
+
+- Add "+" button in notch header to create new tmux sessions running Claude Code.
+- Tmux sessions use `claude-N` naming with smallest available number.
+- Add trash button to kill individual tmux panes without affecting other sessions.
+- Show tmux session name badge (`tmux: claude-1`) in chat header.
+- Markdown links are now clickable — URLs open in browser, file paths open in Finder.
+- Working directory in chat header is clickable — opens folder in Finder and closes panel.
+- Bottom scroll fade gradient on instances list hints at more content below.
+
+### Fixes
+
+- ThinkingView now shows full text with auto-wrap instead of truncated ellipsis.
+- Fix list item text wrapping in MarkdownRenderer cutting off long lines.
+
+---
+
 ## 1.4.1 — 2026-04-08
 
 ### Fixes

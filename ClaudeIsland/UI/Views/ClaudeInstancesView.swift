@@ -11,6 +11,7 @@ import SwiftUI
 struct ClaudeInstancesView: View {
     @ObservedObject var sessionMonitor: ClaudeSessionMonitor
     @ObservedObject var viewModel: NotchViewModel
+    @Binding var scrollFraction: CGFloat
 
     private let rowHeightEstimate: CGFloat = 58
     private let rowSpacing: CGFloat = 2
@@ -75,7 +76,8 @@ struct ClaudeInstancesView: View {
                 onApprove: { approveSession(session) },
                 onReject: { rejectSession(session) },
                 onAnswer: { answers in answerQuestion(session, answers: answers) },
-                onOpenQuestion: { openQuestion(session) }
+                onOpenQuestion: { openQuestion(session) },
+                onKillTmux: { killTmuxSession(session) }
             )
             .id(session.stableId)
         }
@@ -86,6 +88,13 @@ struct ClaudeInstancesView: View {
             contentRows
         }
         .scrollBounceBehavior(.basedOnSize)
+        .onScrollGeometryChange(for: CGFloat.self) { geo in
+            let maxOffset = geo.contentSize.height - geo.containerSize.height
+            guard maxOffset > 0 else { return 1 }
+            return min(1, max(0, geo.contentOffset.y / maxOffset))
+        } action: { _, newValue in
+            scrollFraction = newValue
+        }
     }
 
     private var contentRows: some View {
@@ -143,6 +152,17 @@ struct ClaudeInstancesView: View {
         sessionMonitor.archiveSession(sessionId: session.sessionId)
     }
 
+    private func killTmuxSession(_ session: SessionState) {
+        guard let pid = session.pid else { return }
+        Task {
+            // Kill only the pane, not the entire tmux session
+            _ = await TmuxSessionManager.shared.killPane(forClaudePid: pid)
+            // Session file cleanup is handled by Claude Code itself.
+            // Once the process dies, SessionStore will receive a "ended" hook
+            // and remove it from the UI automatically.
+        }
+    }
+
     private func answerQuestion(_ session: SessionState, answers: [String: String]) {
         sessionMonitor.answerQuestion(sessionId: session.sessionId, answers: answers)
     }
@@ -163,6 +183,7 @@ struct InstanceRow: View {
     let onReject: () -> Void
     let onAnswer: ([String: String]) -> Void
     let onOpenQuestion: () -> Void
+    let onKillTmux: () -> Void
 
     @ObservedObject private var metadataService = SessionMetadataService.shared
     @State private var isHovered = false
@@ -438,8 +459,12 @@ struct InstanceRow: View {
                         }
                     }
 
-                    // Archive button - only for idle or completed sessions
-                    if session.phase == .idle || session.phase == .waitingForInput {
+                    // Kill tmux pane / archive button
+                    if session.isInTmux, session.pid != nil {
+                        IconButton(icon: "trash") {
+                            onKillTmux()
+                        }
+                    } else if session.phase == .idle || session.phase == .waitingForInput {
                         IconButton(icon: "archivebox") {
                             onArchive()
                         }
@@ -730,3 +755,4 @@ enum ToolPreviewData {
         return v.value as? String
     }
 }
+

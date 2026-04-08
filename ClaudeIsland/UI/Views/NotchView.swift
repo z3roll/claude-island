@@ -34,6 +34,7 @@ struct NotchView: View {
     @State private var isWiggling: Bool = false
     @State private var wiggleAngle: Double = 0
     @State private var notificationSuppressedUntil: [String: Date] = [:]  // per-session suppression
+    @State private var instancesScrollFraction: CGFloat = 0
 
     @Namespace private var activityNamespace
 
@@ -169,6 +170,21 @@ struct NotchView: View {
                     )
                     .padding([.horizontal, .bottom], viewModel.status == .opened ? 12 : 0)
                     .background(.black)
+                    .overlay(alignment: .bottom) {
+                        if viewModel.status == .opened
+                            && viewModel.contentType == .instances
+                            && sessionMonitor.instances.count > 4
+                            && instancesScrollFraction < 0.95 {
+                            LinearGradient(
+                                colors: [.clear, .white.opacity(0.15 * (1 - instancesScrollFraction))],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                            .frame(height: 40)
+                            .allowsHitTesting(false)
+                            .animation(.easeOut(duration: 0.15), value: instancesScrollFraction)
+                        }
+                    }
                     .clipShape(currentNotchShape)
                     .overlay(alignment: .top) {
                         Rectangle()
@@ -283,27 +299,28 @@ struct NotchView: View {
 
             // Main content only when opened
             if viewModel.status == .opened {
-                contentView
-                    .frame(width: notchSize.width - 24) // Fixed width to prevent reflow
-                    .frame(maxHeight: .infinity)
-                    .clipped()
-                    .transition(
-                        .asymmetric(
-                            insertion: .scale(scale: 0.8, anchor: .top)
-                                .combined(with: .opacity)
-                                .animation(.smooth(duration: 0.35)),
-                            removal: .scale(scale: 0.3, anchor: .top)
-                                .combined(with: .opacity)
-                                .animation(.easeIn(duration: 0.2))
-                        )
-                    )
-
-                if showsPageIndicator {
-                    pageIndicator
+                VStack(spacing: 0) {
+                    contentView
                         .frame(width: notchSize.width - 24)
-                        .padding(.bottom, 2)
-                        .transition(.opacity.animation(.smooth(duration: 0.2)))
+                        .frame(maxHeight: .infinity)
+                        .clipped()
+
+                    if showsPageIndicator {
+                        pageIndicator
+                            .frame(width: notchSize.width - 24)
+                            .padding(.bottom, 2)
+                    }
                 }
+                .transition(
+                    .asymmetric(
+                        insertion: .scale(scale: 0.8, anchor: .top)
+                            .combined(with: .opacity)
+                            .animation(.smooth(duration: 0.35)),
+                        removal: .scale(scale: 0.3, anchor: .top)
+                            .combined(with: .opacity)
+                            .animation(.easeIn(duration: 0.2))
+                    )
+                )
             }
         }
     }
@@ -420,6 +437,24 @@ struct NotchView: View {
                 .padding(.leading, showClosedActivity ? 8 : 0)
 
             Spacer()
+
+            // "+" button to create new tmux session (only on instances page)
+            if viewModel.contentType == .instances {
+                Button {
+                    Task {
+                        _ = await TmuxSessionManager.shared.createSession()
+                    }
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.white.opacity(0.5))
+                        .frame(width: 20, height: 20)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .pointerStyle(.link)
+                .padding(.trailing, 4)
+            }
         }
     }
 
@@ -439,7 +474,8 @@ struct NotchView: View {
         case .instances:
             ClaudeInstancesView(
                 sessionMonitor: sessionMonitor,
-                viewModel: viewModel
+                viewModel: viewModel,
+                scrollFraction: $instancesScrollFraction
             )
         case .menu:
             NotchMenuView(viewModel: viewModel)
@@ -454,7 +490,8 @@ struct NotchView: View {
             } else {
                 ClaudeInstancesView(
                     sessionMonitor: sessionMonitor,
-                    viewModel: viewModel
+                    viewModel: viewModel,
+                    scrollFraction: $instancesScrollFraction
                 )
             }
         case .question(let sessionId):
@@ -473,7 +510,8 @@ struct NotchView: View {
             } else {
                 ClaudeInstancesView(
                     sessionMonitor: sessionMonitor,
-                    viewModel: viewModel
+                    viewModel: viewModel,
+                    scrollFraction: $instancesScrollFraction
                 )
             }
         }

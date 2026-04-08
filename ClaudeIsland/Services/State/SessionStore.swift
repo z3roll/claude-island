@@ -154,6 +154,15 @@ actor SessionStore {
             // Only upgrade to tmux, never downgrade (process tree can be transiently incomplete)
             if detectedTmux {
                 session.isInTmux = true
+                // Look up tmux session name if not yet resolved
+                if session.tmuxSessionName == nil {
+                    let pidForLookup = pid
+                    Task {
+                        if let name = await TmuxSessionManager.shared.sessionName(forClaudePid: pidForLookup) {
+                            await self.updateTmuxSessionName(sessionId: sessionId, name: name)
+                        }
+                    }
+                }
             }
 
             // Resolve terminal app if not already resolved (reuse the tree we just built)
@@ -163,6 +172,14 @@ actor SessionStore {
                     Self.logger.debug("Resolved terminal: \(terminal.appInfo.displayName, privacy: .public) for session \(sessionId.prefix(8), privacy: .public)")
                     if terminal.isInTmux {
                         session.isInTmux = true
+                        if session.tmuxSessionName == nil {
+                            let pidForLookup = pid
+                            Task {
+                                if let name = await TmuxSessionManager.shared.sessionName(forClaudePid: pidForLookup) {
+                                    await self.updateTmuxSessionName(sessionId: sessionId, name: name)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1179,6 +1196,13 @@ actor SessionStore {
     private func publishState() {
         let sortedSessions = Array(sessions.values).sorted { $0.projectName < $1.projectName }
         sessionsSubject.send(sortedSessions)
+    }
+
+    /// Update the tmux session name for a session
+    private func updateTmuxSessionName(sessionId: String, name: String) {
+        guard sessions[sessionId] != nil else { return }
+        sessions[sessionId]?.tmuxSessionName = name
+        publishState()
     }
 
     // MARK: - Queries

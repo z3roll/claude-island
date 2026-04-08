@@ -25,6 +25,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
     var pid: Int?
     var tty: String?
     var isInTmux: Bool
+    var tmuxSessionName: String?
 
     /// Resolved terminal application info (detected from process tree)
     var resolvedTerminal: ResolvedTerminal?

@@ -67,7 +67,12 @@ struct MarkdownText: View {
                 }
             }
         }
-        .textSelection(.enabled)
+        .contextMenu {
+            Button("Copy") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
+        }
     }
 }
 
@@ -199,6 +204,7 @@ private struct BlockRenderer: View {
                         ForEach(Array(item.children.enumerated()), id: \.offset) { _, child in
                             if let para = child as? Paragraph {
                                 InlineRenderer(children: Array(para.inlineChildren), baseColor: baseColor, fontSize: fontSize)
+                                    .fixedSize(horizontal: false, vertical: true)
                             } else {
                                 BlockRenderer(markup: child, baseColor: baseColor, fontSize: fontSize)
                             }
@@ -223,6 +229,7 @@ private struct BlockRenderer: View {
                         ForEach(Array(item.children.enumerated()), id: \.offset) { _, child in
                             if let para = child as? Paragraph {
                                 InlineRenderer(children: Array(para.inlineChildren), baseColor: baseColor, fontSize: fontSize)
+                                    .fixedSize(horizontal: false, vertical: true)
                             } else {
                                 BlockRenderer(markup: child, baseColor: baseColor, fontSize: fontSize)
                             }
@@ -241,8 +248,20 @@ private struct InlineRenderer: View {
     let baseColor: Color
     let fontSize: CGFloat
 
+    private var containsLink: Bool {
+        children.contains { $0 is Markdown.Link }
+    }
+
+    @ViewBuilder
     var body: some View {
-        asText()
+        if containsLink {
+            asText()
+                .fixedSize(horizontal: false, vertical: true)
+                .pointerStyle(.link)
+        } else {
+            asText()
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     func asText() -> SwiftUI.Text {
@@ -272,9 +291,18 @@ private struct InlineRenderer: View {
                 .foregroundColor(baseColor)
         } else if let link = inline as? Markdown.Link {
             let plainText = link.plainText
-            return SwiftUI.Text(plainText)
-                .foregroundColor(Color.blue)
-                .underline()
+            let destination = link.destination ?? ""
+            var attr = AttributedString(plainText)
+            attr.font = .system(size: fontSize)
+            attr.foregroundColor = Color.blue
+            attr.underlineStyle = .single
+            if let url = URL(string: destination) {
+                attr.link = url
+            } else if !destination.isEmpty {
+                // Handle file paths that URL(string:) can't parse
+                attr.link = URL(fileURLWithPath: destination)
+            }
+            return SwiftUI.Text(attr)
         } else if let strike = inline as? Strikethrough {
             let plainText = strike.plainText
             return SwiftUI.Text(plainText)
