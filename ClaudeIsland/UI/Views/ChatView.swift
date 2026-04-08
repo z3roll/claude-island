@@ -330,6 +330,17 @@ struct ChatView: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(.white.opacity(isHeaderHovered ? 1.0 : 0.85))
                         .lineLimit(1)
+
+                    // Tmux session name badge
+                    if let tmuxName = session.tmuxSessionName {
+                        Text("tmux: \(tmuxName)")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(Color(red: 0.4, green: 0.8, blue: 0.85).opacity(0.5))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color(red: 0.4, green: 0.8, blue: 0.85).opacity(0.08))
+                            .clipShape(Capsule())
+                    }
                 }
                 .padding(.vertical, 6)
                 .contentShape(Rectangle())
@@ -338,10 +349,6 @@ struct ChatView: View {
             .onHover { isHeaderHovered = $0 }
 
             Spacer()
-
-            // Menu toggle area (keep spacing)
-            HStack(spacing: 4) {
-            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -538,14 +545,10 @@ struct ChatView: View {
                 }
             }
 
-            // Folder + directory name (cyan)
-            Image(systemName: "folder")
-                .font(.system(size: 9))
-                .foregroundColor(Color(red: 0.4, green: 0.8, blue: 0.85).opacity(0.6))
-            Text(URL(fileURLWithPath: session.cwd).lastPathComponent)
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundColor(Color(red: 0.4, green: 0.8, blue: 0.85).opacity(0.7))
-                .lineLimit(1)
+            // Folder + directory name (cyan, clickable to open in Finder)
+            CwdButton(cwd: session.cwd) {
+                viewModel.notchClose()
+            }
 
             // Git branch (purple) — read from statusLine cache, updated on every hook event
             let gitBranch = metadataService.metadata[sessionId]?.gitBranch ?? ""
@@ -1447,52 +1450,26 @@ struct SubagentToolsSummary: View {
 struct ThinkingView: View {
     let text: String
 
-    @State private var isExpanded = false
-
-    private var canExpand: Bool {
-        text.count > 80
-    }
-
     var body: some View {
         if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            thinkingContent
-        }
-    }
+            HStack(alignment: .top, spacing: 6) {
+                Circle()
+                    .fill(Color.gray.opacity(0.5))
+                    .frame(width: 6, height: 6)
+                    .padding(.top, 4)
 
-    private var thinkingContent: some View {
-        HStack(alignment: .top, spacing: 6) {
-            Circle()
-                .fill(Color.gray.opacity(0.5))
-                .frame(width: 6, height: 6)
-                .padding(.top, 4)
+                Text(text)
+                    .font(.system(size: 11))
+                    .foregroundColor(.gray)
+                    .italic()
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
 
-            Text(isExpanded ? text : String(text.prefix(80)) + (canExpand ? "..." : ""))
-                .font(.system(size: 11))
-                .foregroundColor(.gray)
-                .italic()
-                .lineLimit(isExpanded ? nil : 1)
-                .multilineTextAlignment(.leading)
-
-            Spacer()
-
-            if canExpand {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(.gray.opacity(0.5))
-                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                    .padding(.top, 3)
+                Spacer()
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 2)
         }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if canExpand {
-                withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                    isExpanded.toggle()
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 2)
     }
 }
 
@@ -1739,3 +1716,40 @@ private struct SendButton: View {
         return isHovered ? 1.08 : 1.0
     }
 }
+
+// MARK: - CWD Button
+
+/// Clickable working directory that opens in Finder on click.
+private struct CwdButton: View {
+    let cwd: String
+    let onOpen: () -> Void
+    @State private var isHovered = false
+
+    private let cwdColor = Color(red: 0.4, green: 0.8, blue: 0.85)
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "folder")
+                .font(.system(size: 9))
+                .foregroundColor(cwdColor.opacity(isHovered ? 0.9 : 0.6))
+            Text(URL(fileURLWithPath: cwd).lastPathComponent)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundColor(cwdColor.opacity(isHovered ? 1.0 : 0.7))
+                .underline(isHovered)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(cwdColor.opacity(isHovered ? 0.1 : 0))
+        )
+        .onHover { isHovered = $0 }
+        .pointerStyle(.link)
+        .onTapGesture {
+            NSWorkspace.shared.open(URL(fileURLWithPath: cwd))
+            onOpen()
+        }
+    }
+}
+
