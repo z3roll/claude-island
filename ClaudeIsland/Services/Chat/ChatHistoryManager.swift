@@ -89,7 +89,7 @@ class ChatHistoryManager: ObservableObject {
     private func filterOutSubagentTools(_ items: [ChatHistoryItem]) -> [ChatHistoryItem] {
         var subagentToolIds = Set<String>()
         for item in items {
-            if case .toolCall(let tool) = item.type, tool.name == "Task" {
+            if case .toolCall(let tool) = item.type, tool.isAgentTool {
                 for subagentTool in tool.subagentTools {
                     subagentToolIds.insert(subagentTool.id)
                 }
@@ -127,8 +127,14 @@ struct ToolCallItem: Equatable, Sendable {
     var result: String?
     var structuredResult: ToolResultData?
 
-    /// For Task tools: nested subagent tool calls
+    /// For Task/Agent tools: nested subagent tool calls
     var subagentTools: [SubagentToolCall]
+
+    /// Whether this tool is an agent spawning tool (Claude Code renamed "Task" to "Agent")
+    var isAgentTool: Bool { name == "Task" || name == "Agent" }
+
+    /// Whether the agent is still actively running (set by SubagentState tracking)
+    var isAgentRunning: Bool = false
 
     /// Preview text for the tool (input-based)
     var inputPreview: String {

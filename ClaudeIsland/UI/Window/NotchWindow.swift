@@ -70,24 +70,32 @@ class NotchPanel: NSPanel {
         // For mouse events, check if we should pass through
         if event.type == .leftMouseDown || event.type == .leftMouseUp ||
            event.type == .rightMouseDown || event.type == .rightMouseUp {
-            // Get the location in window coordinates
             let locationInWindow = event.locationInWindow
-            NSLog("[sendEvent] type=%ld pt=(%.1f, %.1f) ignoresMouseEvents=%@",
-                  event.type.rawValue, locationInWindow.x, locationInWindow.y,
-                  ignoresMouseEvents ? "YES" : "NO")
 
             // Check if any view wants to handle this event
             if let contentView = self.contentView,
                contentView.hitTest(locationInWindow) == nil {
-                NSLog("[sendEvent] PASS-THROUGH triggered")
                 // No view wants this event - pass it through to windows behind
                 // by temporarily ignoring mouse events and re-posting
                 let screenLocation = convertPoint(toScreen: locationInWindow)
                 ignoresMouseEvents = true
 
-                // Re-post the event after a tiny delay
+                // Re-post the event after a tiny delay, then restore
+                // ignoresMouseEvents so the panel keeps working.
                 DispatchQueue.main.async { [weak self] in
                     self?.repostMouseEvent(event, at: screenLocation)
+                    // Restore after another tick so the re-posted event
+                    // has time to reach the underlying window.
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        // Only restore if panel is still opened
+                        if !self.ignoresMouseEvents { return }
+                        // Check with the VC if we should still accept events
+                        if let vc = self.contentViewController as? NotchViewController,
+                           vc.viewModel.status == .opened {
+                            self.ignoresMouseEvents = false
+                        }
+                    }
                 }
                 return
             }

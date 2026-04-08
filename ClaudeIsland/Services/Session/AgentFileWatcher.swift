@@ -40,9 +40,13 @@ class AgentFileWatcher {
         self.agentId = agentId
         self.cwd = cwd
 
-        let projectDir = cwd.replacingOccurrences(of: "/", with: "-")
-                            .replacingOccurrences(of: ".", with: "-")
-        self.filePath = NSHomeDirectory() + "/.claude/projects/" + projectDir + "/agent-" + agentId + ".jsonl"
+        self.filePath = ConversationParser.findAgentFile(agentId: agentId, cwd: cwd)
+            ?? {
+                // Fallback to old path if file doesn't exist yet
+                let projectDir = cwd.replacingOccurrences(of: "/", with: "-")
+                    .replacingOccurrences(of: ".", with: "-")
+                return NSHomeDirectory() + "/.claude/projects/" + projectDir + "/agent-" + agentId + ".jsonl"
+            }()
     }
 
     /// Start watching the agent file

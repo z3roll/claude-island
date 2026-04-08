@@ -67,6 +67,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Mixpanel.mainInstance().track(event: "App Launched")
         Mixpanel.mainInstance().flush()
 
+        MainThreadWatchdog.start()
         HookInstaller.installIfNeeded()
         HookInstaller.ensureStatusLineSelfHeal()
         NSApplication.shared.setActivationPolicy(.accessory)

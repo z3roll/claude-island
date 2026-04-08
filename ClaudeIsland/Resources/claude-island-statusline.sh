@@ -6,6 +6,33 @@
 
 INPUT=$(cat)
 
+# Self-cleanup: if Claude Island app has been deleted, restore original
+# statusLine and remove wrapper artifacts so the user isn't stuck.
+if [ ! -d "/Applications/Claude Island.app" ]; then
+    _BACKUP="$HOME/.claude/.claude-island-statusline-backup.json"
+    _SETTINGS="$HOME/.claude/settings.json"
+    if command -v jq &>/dev/null && [ -f "$_SETTINGS" ]; then
+        if [ -f "$_BACKUP" ]; then
+            # Restore original statusLine from backup
+            _ORIG=$(jq -c '.' "$_BACKUP" 2>/dev/null)
+            jq --argjson orig "$_ORIG" '.statusLine = $orig' "$_SETTINGS" > "${_SETTINGS}.tmp" && mv "${_SETTINGS}.tmp" "$_SETTINGS"
+        else
+            # No backup — remove statusLine entirely
+            jq 'del(.statusLine)' "$_SETTINGS" > "${_SETTINGS}.tmp" && mv "${_SETTINGS}.tmp" "$_SETTINGS"
+        fi
+    fi
+    # Clean up wrapper artifacts
+    rm -f "$HOME/.claude/hooks/claude-island-statusline.sh"
+    rm -f "$HOME/.claude/hooks/.claude-island-original-statusline.sh"
+    rm -f "$_BACKUP"
+    # Still output for this invocation — pass through to original if available
+    _CI_ORIGINAL_SCRIPT="$HOME/.claude/hooks/.claude-island-original-statusline.sh"
+    if [ -f "$_CI_ORIGINAL_SCRIPT" ]; then
+        echo "$INPUT" | bash "$_CI_ORIGINAL_SCRIPT"
+    fi
+    exit 0
+fi
+
 # Cache session metadata for Claude Island
 if command -v jq &>/dev/null && [ -n "$INPUT" ]; then
     # Also write a shared rate-limit cache (5h/7d) for TokenUsageBadge.
@@ -20,9 +47,16 @@ if command -v jq &>/dev/null && [ -n "$INPUT" ]; then
         }
     }' > "${TMPDIR}claude-usage-cache.json" 2>/dev/null
 
+    # Get git branch from cwd (fast, ~5ms)
+    _CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
+    _GIT_BRANCH=""
+    if [ -n "$_CWD" ]; then
+        _GIT_BRANCH=$(GIT_OPTIONAL_LOCKS=0 git -C "$_CWD" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    fi
+
     _SID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
     if [ -n "$_SID" ]; then
-        echo "$INPUT" | jq -c '{
+        echo "$INPUT" | jq -c --arg branch "$_GIT_BRANCH" '{
             session_id,
             model: .model.display_name,
             model_id: .model.id,
@@ -40,7 +74,8 @@ if command -v jq &>/dev/null && [ -n "$INPUT" ]; then
             five_hour_pct: .rate_limits.five_hour.used_percentage,
             five_hour_resets_at: .rate_limits.five_hour.resets_at,
             seven_day_pct: .rate_limits.seven_day.used_percentage,
-            seven_day_resets_at: .rate_limits.seven_day.resets_at
+            seven_day_resets_at: .rate_limits.seven_day.resets_at,
+            git_branch: $branch
         }' > "${TMPDIR}claude-island-session-${_SID}.json" 2>/dev/null
     fi
 fi
