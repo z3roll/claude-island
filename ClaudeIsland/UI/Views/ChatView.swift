@@ -792,10 +792,21 @@ struct ChatView: View {
 
         if let target = await findTmuxTarget(tty: tty) {
             guard let tmuxPath = await TmuxPathFinder.shared.getTmuxPath() else { return }
-            // Clear existing input line (Ctrl+U) before sending new text
+            // Clear existing input line thoroughly before sending new text.
+            // After ESC interrupt, claude may have restored the previous input,
+            // so we need to make sure it's fully cleared.
+            // C-e moves to end of line, C-u clears from cursor to start
+            _ = try? await ProcessExecutor.shared.run(
+                tmuxPath,
+                arguments: ["send-keys", "-t", target.targetString, "C-e"]
+            )
             _ = try? await ProcessExecutor.shared.run(
                 tmuxPath,
                 arguments: ["send-keys", "-t", target.targetString, "C-u"]
+            )
+            _ = try? await ProcessExecutor.shared.run(
+                tmuxPath,
+                arguments: ["send-keys", "-t", target.targetString, "C-k"]
             )
 
             let lineCount = text.split(separator: "\n", omittingEmptySubsequences: false).count
@@ -855,7 +866,7 @@ struct ChatView: View {
         // Immediately hide processing indicator
         localInterrupted = true
 
-        // Copy last user message to input box
+        // Copy last user message to input box for easy re-send
         if let lastUserItem = history.last(where: { item in
             if case .user = item.type { return true }
             return false
@@ -868,7 +879,7 @@ struct ChatView: View {
             await SessionStore.shared.process(.interruptDetected(sessionId: sessionId))
         }
 
-        // Send ESC to tmux
+        // Send ESC to tmux, then clear any residual input
         guard let tty = session.tty else { return }
         Task {
             if let target = await findTmuxTarget(tty: tty) {
@@ -876,6 +887,12 @@ struct ChatView: View {
                 _ = try? await ProcessExecutor.shared.run(
                     tmuxPath,
                     arguments: ["send-keys", "-t", target.targetString, "Escape"]
+                )
+                // Clear any residual text in the tmux input line
+                try? await Task.sleep(for: .milliseconds(100))
+                _ = try? await ProcessExecutor.shared.run(
+                    tmuxPath,
+                    arguments: ["send-keys", "-t", target.targetString, "C-u"]
                 )
             }
         }

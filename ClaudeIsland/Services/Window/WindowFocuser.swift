@@ -34,7 +34,10 @@ actor WindowFocuser {
                 app.unhide()
             }
 
-            // Use `open -a` to activate and restore minimized windows.
+            // Activate with keyboard focus
+            app.activate(options: [.activateIgnoringOtherApps])
+
+            // Also use `open -a` to restore minimized windows.
             // AXUIElement deminiaturize causes side effects (e.g., Ghostty tab switching).
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/usr/bin/open")

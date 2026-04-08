@@ -115,7 +115,18 @@ struct ClaudeInstancesView: View {
     // MARK: - Actions
 
     private func focusSession(_ session: SessionState) {
+        // Close the notch panel and resign key window so terminal gets focus
+        viewModel.notchClose()
+        NSApp.keyWindow?.resignKey()
+
         Task {
+            // For tmux sessions, switch to the correct pane first
+            if session.isInTmux, let pid = session.pid {
+                if let target = await TmuxTargetFinder.shared.findTarget(forClaudePid: pid) {
+                    _ = await TmuxController.shared.switchToPane(target: target)
+                }
+            }
+
             if let terminal = session.resolvedTerminal {
                 _ = await WindowFocuser.shared.focusTerminal(
                     info: terminal.appInfo,
@@ -123,8 +134,6 @@ struct ClaudeInstancesView: View {
                     cachedTTY: terminal.tty
                 )
             } else {
-                // Fallback: activate any known terminal app by bundle ID
-                // or just open Terminal.app as last resort
                 _ = await WindowFocuser.shared.focusTerminalApp(bundleId: "com.apple.Terminal")
             }
         }
