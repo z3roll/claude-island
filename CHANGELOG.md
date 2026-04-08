@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.4.1 — 2026-04-08
+
+### Fixes
+
+- External display now uses built-in screen's notch size instead of hardcoded
+  fallback, ensuring consistent sizing across all displays.
+- Fine-tune internal display idle notch height (+0.5 offset).
+- StatusLine wrapper auto-detects app deletion and restores original statusLine
+  config, removing all wrapper artifacts on next invocation.
+
+### Build
+
+- `build.sh` now auto-derives `CURRENT_PROJECT_VERSION` from `git rev-list --count HEAD`,
+  preventing false Sparkle update prompts during development.
+- Adopt Semantic Versioning (`MAJOR.MINOR.PATCH`) for all releases.
+
+---
+
 ## 1.4 — 2026-04-06
 
 ### Chat view

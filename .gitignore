@@ -42,6 +42,7 @@ releases/
 # Xcode backup
 *.xcodeproj.backup/
 CLAUDE.md
+knowledge.md
 
 # Private release script
 scripts/release.sh
