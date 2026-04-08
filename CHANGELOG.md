@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.5.1 — 2026-04-09
+
+### Fixes
+
+- Terminal button now gives keyboard focus to the terminal immediately.
+- Terminal button switches to the correct tmux pane before focusing.
+- Notch panel closes and resigns key window when clicking terminal button.
+- Clear tmux input line thoroughly before sending to prevent duplicate messages after ESC interrupt.
+
+---
+
 ## 1.5.0 — 2026-04-09
 
 ### Features
