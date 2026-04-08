@@ -209,6 +209,10 @@ actor SessionStore {
             session.wasInterrupted = false
         }
 
+        // Force active agent tools to stay .running regardless of what
+        // other code paths (file sync, tool completion) may have set.
+        syncAgentRunningFlags(session: &session)
+
         sessions[sessionId] = session
         // NOTE: Do NOT call publishState() here — process() calls it once at the end
         // to avoid UI seeing intermediate states during a single event processing cycle.
@@ -260,9 +264,10 @@ actor SessionStore {
             if let toolUseId = event.toolUseId, let toolName = event.tool {
                 session.toolTracker.startTool(id: toolUseId, name: toolName)
 
-                // Skip creating top-level placeholder for subagent tools
-                // They'll appear under their parent Task instead
-                let isSubagentTool = session.subagentState.hasActiveSubagent && toolName != "Task"
+                // Skip creating top-level placeholder for subagent tools.
+                // Their details are populated from the agent JSONL file when the
+                // agent completes (parallel agents can't be attributed via hooks).
+                let isSubagentTool = session.subagentState.hasActiveSubagent && toolName != "Task" && toolName != "Agent"
                 if isSubagentTool {
                     return
                 }
@@ -302,6 +307,7 @@ actor SessionStore {
         case "PostToolUse":
             if let toolUseId = event.toolUseId {
                 session.toolTracker.completeTool(id: toolUseId, success: true)
+
                 // Update chatItem status - tool completed (possibly approved via terminal)
                 // Only update if still waiting for approval or running
                 for i in 0..<session.chatItems.count {
@@ -327,21 +333,35 @@ actor SessionStore {
     private func processSubagentTracking(event: HookEvent, session: inout SessionState) {
         switch event.event {
         case "PreToolUse":
-            if event.tool == "Task", let toolUseId = event.toolUseId {
+            if event.tool == "Task" || event.tool == "Agent", let toolUseId = event.toolUseId {
                 let description = event.toolInput?["description"]?.value as? String
                 session.subagentState.startTask(taskToolId: toolUseId, description: description)
                 Self.logger.debug("Started Task subagent tracking: \(toolUseId.prefix(12), privacy: .public)")
             }
 
         case "PostToolUse":
-            if event.tool == "Task" {
+            if event.tool == "Task" || event.tool == "Agent" {
                 Self.logger.debug("PostToolUse for Task received (subagent still running)")
             }
 
         case "SubagentStop":
-            // SubagentStop fires when a subagent completes - stop tracking
-            // Subagent tools are populated from agent file in processFileUpdated
+            // SubagentStop fires when a subagent completes.
+            // Mark all active Agent/Task chatItems as .success now.
             Self.logger.debug("SubagentStop received")
+            for taskId in session.subagentState.activeTasks.keys {
+                for i in 0..<session.chatItems.count {
+                    if session.chatItems[i].id == taskId,
+                       case .toolCall(var tool) = session.chatItems[i].type,
+                       tool.isAgentTool && tool.status == .running {
+                        tool.status = .success
+                        session.chatItems[i] = ChatHistoryItem(
+                            id: taskId,
+                            type: .toolCall(tool),
+                            timestamp: session.chatItems[i].timestamp
+                        )
+                    }
+                }
+            }
 
         default:
             break
@@ -361,6 +381,7 @@ actor SessionStore {
     private func processSubagentToolExecuted(sessionId: String, tool: SubagentToolCall) {
         guard var session = sessions[sessionId] else { return }
         session.subagentState.addSubagentTool(tool)
+        syncSubagentToolsToChatItems(session: &session)
         sessions[sessionId] = session
     }
 
@@ -368,7 +389,43 @@ actor SessionStore {
     private func processSubagentToolCompleted(sessionId: String, toolId: String, status: ToolStatus) {
         guard var session = sessions[sessionId] else { return }
         session.subagentState.updateSubagentToolStatus(toolId: toolId, status: status)
+        syncSubagentToolsToChatItems(session: &session)
         sessions[sessionId] = session
+    }
+
+    /// Sync isAgentRunning flag on Agent/Task chatItems based on activeTasks.
+    private func syncAgentRunningFlags(session: inout SessionState) {
+        let activeIds = Set(session.subagentState.activeTasks.keys)
+        for i in 0..<session.chatItems.count {
+            guard case .toolCall(var tool) = session.chatItems[i].type,
+                  tool.isAgentTool else { continue }
+            let shouldBeRunning = activeIds.contains(session.chatItems[i].id)
+            if tool.isAgentRunning != shouldBeRunning {
+                tool.isAgentRunning = shouldBeRunning
+                session.chatItems[i] = ChatHistoryItem(
+                    id: session.chatItems[i].id,
+                    type: .toolCall(tool),
+                    timestamp: session.chatItems[i].timestamp
+                )
+            }
+        }
+    }
+
+    /// Copy subagentState.activeTasks[*].subagentTools into the matching
+    /// Task chatItem so the UI and filterOutSubagentTools see them in real time.
+    private func syncSubagentToolsToChatItems(session: inout SessionState) {
+        for (taskId, taskCtx) in session.subagentState.activeTasks {
+            guard !taskCtx.subagentTools.isEmpty,
+                  let idx = session.chatItems.firstIndex(where: { $0.id == taskId }),
+                  case .toolCall(var tool) = session.chatItems[idx].type,
+                  tool.isAgentTool else { continue }
+            tool.subagentTools = taskCtx.subagentTools
+            session.chatItems[idx] = ChatHistoryItem(
+                id: taskId,
+                type: .toolCall(tool),
+                timestamp: session.chatItems[idx].timestamp
+            )
+        }
     }
 
     /// Handle subagent stopped event
@@ -734,6 +791,12 @@ actor SessionStore {
             toolResults: payload.toolResults,
             structuredResults: payload.structuredResults
         )
+
+        // Force active agent tools back to .running after file sync
+        if var updatedSession = sessions[payload.sessionId] {
+            syncAgentRunningFlags(session: &updatedSession)
+            sessions[payload.sessionId] = updatedSession
+        }
     }
 
     /// Populate subagent tools for Task tools using their agent JSONL files
@@ -744,7 +807,7 @@ actor SessionStore {
     ) async {
         for i in 0..<session.chatItems.count {
             guard case .toolCall(var tool) = session.chatItems[i].type,
-                  tool.name == "Task",
+                  tool.isAgentTool,
                   let structuredResult = structuredResults[session.chatItems[i].id],
                   case .task(let taskResult) = structuredResult,
                   !taskResult.agentId.isEmpty else { continue }

@@ -12,6 +12,8 @@ echo "=== Building Claude Island ==="
 # Optional: release.sh passes MARKETING_VERSION + CURRENT_PROJECT_VERSION to
 # override the pbxproj defaults. Standalone `./scripts/build.sh` uses whatever
 # is in the project file.
+: "${CURRENT_PROJECT_VERSION:=$(git rev-list --count HEAD)}"
+
 BUILD_ARGS=(
     -scheme ClaudeIsland
     -configuration Release
@@ -19,12 +21,10 @@ BUILD_ARGS=(
     CODE_SIGN_IDENTITY="-"
     CODE_SIGNING_REQUIRED=NO
     CODE_SIGNING_ALLOWED=NO
+    "CURRENT_PROJECT_VERSION=$CURRENT_PROJECT_VERSION"
 )
 if [ -n "$MARKETING_VERSION" ]; then
     BUILD_ARGS+=("MARKETING_VERSION=$MARKETING_VERSION")
-fi
-if [ -n "$CURRENT_PROJECT_VERSION" ]; then
-    BUILD_ARGS+=("CURRENT_PROJECT_VERSION=$CURRENT_PROJECT_VERSION")
 fi
 
 xcodebuild "${BUILD_ARGS[@]}" 2>&1 | tail -5

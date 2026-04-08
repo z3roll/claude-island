@@ -122,7 +122,7 @@ actor ConversationParser {
             if type == "user" && !isMeta {
                 if let message = json["message"] as? [String: Any],
                    let msgContent = message["content"] as? String {
-                    if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent.hasPrefix("Caveat:") {
+                    if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent.hasPrefix("Caveat:") && !msgContent.hasPrefix("<task-notification>") && !msgContent.hasPrefix("<system-reminder>") {
                         firstUserMessage = Self.truncateMessage(msgContent, maxLength: 50)
                         break
                     }
@@ -144,7 +144,7 @@ actor ConversationParser {
                     let isMeta = json["isMeta"] as? Bool ?? false
                     if !isMeta, let message = json["message"] as? [String: Any] {
                         if let msgContent = message["content"] as? String {
-                            if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent.hasPrefix("Caveat:") {
+                            if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent.hasPrefix("Caveat:") && !msgContent.hasPrefix("<task-notification>") && !msgContent.hasPrefix("<system-reminder>") {
                                 lastMessage = msgContent
                                 lastMessageRole = type
                             }
@@ -175,7 +175,7 @@ actor ConversationParser {
                 let isMeta = json["isMeta"] as? Bool ?? false
                 if !isMeta, let message = json["message"] as? [String: Any] {
                     if let msgContent = message["content"] as? String {
-                        if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent.hasPrefix("Caveat:") {
+                        if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent.hasPrefix("Caveat:") && !msgContent.hasPrefix("<task-notification>") && !msgContent.hasPrefix("<system-reminder>") {
                             if let timestampStr = json["timestamp"] as? String {
                                 lastUserMessageDate = formatter.date(from: timestampStr)
                             }
@@ -622,7 +622,7 @@ actor ConversationParser {
         var blocks: [MessageBlock] = []
 
         if let content = messageDict["content"] as? String {
-            if content.hasPrefix("<command-name>") || content.hasPrefix("<local-command") || content.hasPrefix("Caveat:") {
+            if content.hasPrefix("<command-name>") || content.hasPrefix("<local-command") || content.hasPrefix("Caveat:") || content.hasPrefix("<task-notification>") || content.hasPrefix("<system-reminder>") {
                 return nil
             }
             if content.hasPrefix("[Request interrupted by user") {
@@ -734,7 +734,7 @@ actor ConversationParser {
             return parseGlobResult(toolUseResult)
         case "TodoWrite":
             return parseTodoWriteResult(toolUseResult)
-        case "Task":
+        case "Task", "Agent":
             return parseTaskResult(toolUseResult)
         case "WebFetch":
             return parseWebFetchResult(toolUseResult)
@@ -1017,10 +1017,8 @@ actor ConversationParser {
     func parseSubagentTools(agentId: String, cwd: String) -> [SubagentToolInfo] {
         guard !agentId.isEmpty else { return [] }
 
-        let projectDir = cwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
-        let agentFile = NSHomeDirectory() + "/.claude/projects/" + projectDir + "/agent-" + agentId + ".jsonl"
-
-        guard FileManager.default.fileExists(atPath: agentFile),
+        guard let agentFile = Self.findAgentFile(agentId: agentId, cwd: cwd),
+              FileManager.default.fileExists(atPath: agentFile),
               let content = try? String(contentsOfFile: agentFile, encoding: .utf8) else {
             return []
         }
@@ -1093,6 +1091,62 @@ actor ConversationParser {
     }
 }
 
+extension ConversationParser {
+    /// Find the agent JSONL file. Claude Code stores these at:
+    ///   ~/.claude/projects/<projectDir>/<sessionId>/subagents/agent-<agentId>.jsonl  (new)
+    ///   ~/.claude/projects/<projectDir>/agent-<agentId>.jsonl                         (old)
+    nonisolated static func findAgentFile(agentId: String, cwd: String) -> String? {
+        let filename = "agent-" + agentId + ".jsonl"
+        let fm = FileManager.default
+        let projectsBase = NSHomeDirectory() + "/.claude/projects/"
+
+        // Search the given cwd AND all parent directories (same as resolveSessionFilePath)
+        var searchCwd = cwd
+        while !searchCwd.isEmpty {
+            let projectDir = searchCwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
+            let baseDir = projectsBase + projectDir
+
+            if fm.fileExists(atPath: baseDir) {
+                // Old path: directly in project dir
+                let oldPath = baseDir + "/" + filename
+                if fm.fileExists(atPath: oldPath) { return oldPath }
+
+                // New path: inside <sessionId>/subagents/
+                if let sessionDirs = try? fm.contentsOfDirectory(atPath: baseDir) {
+                    for dir in sessionDirs {
+                        let candidate = baseDir + "/" + dir + "/subagents/" + filename
+                        if fm.fileExists(atPath: candidate) { return candidate }
+                    }
+                }
+            }
+
+            // Move to parent
+            let parent = (searchCwd as NSString).deletingLastPathComponent
+            if parent == searchCwd || parent == "/" { break }
+            searchCwd = parent
+        }
+
+        // Last resort: search ALL project directories
+        if let allDirs = try? fm.contentsOfDirectory(atPath: projectsBase) {
+            for projDir in allDirs {
+                let baseDir = projectsBase + projDir
+                // Check subagents subdirs
+                if let sessionDirs = try? fm.contentsOfDirectory(atPath: baseDir) {
+                    for dir in sessionDirs {
+                        let candidate = baseDir + "/" + dir + "/subagents/" + filename
+                        if fm.fileExists(atPath: candidate) { return candidate }
+                    }
+                }
+                // Check direct
+                let direct = baseDir + "/" + filename
+                if fm.fileExists(atPath: direct) { return direct }
+            }
+        }
+
+        return nil
+    }
+}
+
 /// Info about a subagent tool call parsed from JSONL
 struct SubagentToolInfo: Sendable {
     let id: String
@@ -1109,10 +1163,8 @@ extension ConversationParser {
     nonisolated static func parseSubagentToolsSync(agentId: String, cwd: String) -> [SubagentToolInfo] {
         guard !agentId.isEmpty else { return [] }
 
-        let projectDir = cwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
-        let agentFile = NSHomeDirectory() + "/.claude/projects/" + projectDir + "/agent-" + agentId + ".jsonl"
-
-        guard FileManager.default.fileExists(atPath: agentFile),
+        guard let agentFile = findAgentFile(agentId: agentId, cwd: cwd),
+              FileManager.default.fileExists(atPath: agentFile),
               let content = try? String(contentsOfFile: agentFile, encoding: .utf8) else {
             return []
         }

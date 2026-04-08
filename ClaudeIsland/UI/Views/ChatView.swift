@@ -1055,14 +1055,13 @@ struct ToolCallView: View {
     let tool: ToolCallItem
     let sessionId: String
 
-    @State private var pulseOpacity: Double = 0.6
     @State private var isExpanded: Bool = false
     @State private var isHovering: Bool = false
 
     private var statusColor: Color {
         switch tool.status {
         case .running:
-            return Color.white.opacity(0.45)
+            return tool.isAgentTool ? Color.orange : Color.white.opacity(0.45)
         case .waitingForApproval:
             return Color.orange
         case .success:
@@ -1089,9 +1088,10 @@ struct ToolCallView: View {
         tool.result != nil || tool.structuredResult != nil
     }
 
-    /// Whether the tool can be expanded (has result, NOT Task tools)
+    /// Whether the tool can be expanded
     private var canExpand: Bool {
-        tool.name != "Task" && (hasResult || tool.name == "Edit")
+        if tool.isAgentTool { return !tool.subagentTools.isEmpty }
+        return hasResult || tool.name == "Edit"
     }
 
     private var showContent: Bool {
@@ -1110,16 +1110,11 @@ struct ToolCallView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .top, spacing: 6) {
-                Circle()
-                    .fill(statusColor.opacity(tool.status == .running || tool.status == .waitingForApproval ? pulseOpacity : 0.6))
-                    .frame(width: 6, height: 6)
-                    .padding(.top, 5)
-                    .id(tool.status)  // Forces view recreation, cancelling repeatForever animation
-                    .onAppear {
-                        if tool.status == .running || tool.status == .waitingForApproval {
-                            startPulsing()
-                        }
-                    }
+                ToolStatusDot(
+                    color: tool.isAgentRunning ? .orange : statusColor,
+                    isAnimating: tool.isAgentRunning || tool.status == .running || tool.status == .waitingForApproval
+                )
+                .padding(.top, 5)
 
                 // Unified format: ToolName(primary_arg) — matches Claude CLI style
                 let header = toolHeaderDisplay(expanded: isExpanded)
@@ -1138,13 +1133,13 @@ struct ToolCallView: View {
                     }
                 }
 
-                // Supplemental inline text (Task subagent count, agent desc)
-                if tool.name == "Task" && !tool.subagentTools.isEmpty {
-                    Text("(\(tool.subagentTools.count) tools)")
+                // Supplemental inline text (agent desc)
+                if tool.isAgentTool && !tool.subagentTools.isEmpty {
+                    let done = tool.subagentTools.filter { $0.status == .success || $0.status == .error }.count
+                    Text("(\(done)/\(tool.subagentTools.count) tools)")
                         .font(.system(size: 11))
                         .foregroundColor(textColor.opacity(0.7))
                         .lineLimit(1)
-                        .truncationMode(.tail)
                 } else if tool.name == "AgentOutputTool", let desc = agentDescription {
                     let blocking = tool.input["block"] == "true"
                     Text(blocking ? "Waiting: \(desc)" : desc)
@@ -1156,8 +1151,8 @@ struct ToolCallView: View {
 
                 Spacer()
 
-                // Expand indicator. Edit shows even while running (diff available from input).
-                if canExpand && (tool.status != .running || tool.name == "Edit") && tool.status != .waitingForApproval {
+                // Expand indicator. Edit/Task show even while running.
+                if canExpand && (tool.status != .running || tool.name == "Edit" || tool.isAgentTool) && tool.status != .waitingForApproval {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .medium))
                         .foregroundColor(.white.opacity(0.3))
@@ -1166,18 +1161,20 @@ struct ToolCallView: View {
                 }
             }
 
-            // Subagent tools list (for Task tools)
-            if tool.name == "Task" && !tool.subagentTools.isEmpty {
-                SubagentToolsList(tools: tool.subagentTools)
-                    .padding(.leading, 12)
-                    .padding(.top, 2)
+            // Agent subagent tools list (shown when expanded)
+            if tool.isAgentTool && !tool.subagentTools.isEmpty && isExpanded {
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(tool.subagentTools) { subTool in
+                        AgentToolDetailRow(tool: subTool)
+                    }
+                }
+                .padding(.leading, 12)
+                .padding(.top, 4)
             }
-
-
 
             // Result content (Edit always shows, others when expanded)
             // Edit tools bypass hasResult check - fallback in ToolResultContent renders from input params
-            if showContent && tool.status != .running && tool.name != "Task" && (hasResult || tool.name == "Edit") {
+            if showContent && tool.status != .running && !tool.isAgentTool && (hasResult || tool.name == "Edit") {
                 ToolResultContent(tool: tool)
                     .padding(.leading, 12)
                     .padding(.top, 4)
@@ -1214,14 +1211,6 @@ struct ToolCallView: View {
         .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isExpanded)
     }
 
-    private func startPulsing() {
-        withAnimation(
-            .easeInOut(duration: 0.6)
-            .repeatForever(autoreverses: true)
-        ) {
-            pulseOpacity = 0.15
-        }
-    }
 
     /// Build the "ToolName(arg)" header display.
     /// When expanded=true, the arg is shown in full (no truncation).
@@ -1254,9 +1243,9 @@ struct ToolCallView: View {
             if let url = tool.input["url"], !url.isEmpty {
                 return ("WebFetch", url)
             }
-        case "Task":
-            if let desc = tool.input["description"], !desc.isEmpty {
-                return ("Task", desc)
+        case "Task", "Agent":
+            if let desc = tool.input["description"] ?? tool.input["prompt"], !desc.isEmpty {
+                return (name, String(desc.prefix(60)))
             }
         case "TodoWrite":
             return ("TodoWrite", nil)
@@ -1302,41 +1291,67 @@ struct ToolCallView: View {
 
 }
 
-// MARK: - Subagent Views
+// MARK: - Agent Activity Views
 
-/// List of subagent tools (shown during Task execution)
-struct SubagentToolsList: View {
-    let tools: [SubagentToolCall]
-
-    /// Number of hidden tools (all except last 2)
-    private var hiddenCount: Int {
-        max(0, tools.count - 2)
-    }
-
-    /// Recent tools to show (last 2, regardless of status)
-    private var recentTools: [SubagentToolCall] {
-        Array(tools.suffix(2))
-    }
+/// Categorizes subagent tool calls by activity type
+/// Pulsing status dot that survives parent view re-renders.
+/// Uses TimelineView instead of withAnimation(.repeatForever) which breaks
+/// when the parent chatItem is updated by file sync.
+struct ToolStatusDot: View {
+    let color: Color
+    let isAnimating: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            // Show count of older hidden tools at top
-            if hiddenCount > 0 {
-                Text("+\(hiddenCount) more tool uses")
-                    .font(.system(size: 10))
-                    .foregroundColor(.white.opacity(0.4))
+        if isAnimating {
+            TimelineView(.periodic(from: .now, by: 0.05)) { context in
+                let t = context.date.timeIntervalSinceReferenceDate
+                let opacity = 0.35 + 0.35 * sin(t * 4.0) // ~0.6s period
+                Circle()
+                    .fill(color.opacity(opacity))
+                    .frame(width: 6, height: 6)
             }
-
-            // Show last 2 tools (most recent activity)
-            ForEach(recentTools) { tool in
-                SubagentToolRow(tool: tool)
-            }
+        } else {
+            Circle()
+                .fill(color.opacity(0.6))
+                .frame(width: 6, height: 6)
         }
     }
 }
 
-/// Single subagent tool row
-struct SubagentToolRow: View {
+enum AgentActivityCategory: String, CaseIterable {
+    case reading = "Reading code"
+    case searching = "Searching code"
+    case editing = "Editing code"
+    case commands = "Running commands"
+    case web = "Browsing web"
+    case other = "Other"
+
+    var icon: String {
+        switch self {
+        case .reading: return "doc.text"
+        case .searching: return "magnifyingglass"
+        case .editing: return "pencil"
+        case .commands: return "terminal"
+        case .web: return "globe"
+        case .other: return "ellipsis.circle"
+        }
+    }
+
+    static func category(for toolName: String) -> AgentActivityCategory {
+        switch toolName {
+        case "Read": return .reading
+        case "Grep", "Glob": return .searching
+        case "Edit", "Write": return .editing
+        case "Bash": return .commands
+        case "WebSearch", "WebFetch": return .web
+        default: return .other
+        }
+    }
+
+}
+
+/// Individual tool detail within an expanded category
+struct AgentToolDetailRow: View {
     let tool: SubagentToolCall
 
     @State private var dotOpacity: Double = 0.5
@@ -1349,26 +1364,26 @@ struct SubagentToolRow: View {
         }
     }
 
-    /// Get status text using the same logic as regular tools
-    private var statusText: String {
-        if tool.status == .interrupted {
-            return "Interrupted"
-        } else if tool.status == .running {
-            return ToolStatusDisplay.running(for: tool.name, input: tool.input).text
-        } else {
-            // For completed subagent tools, we don't have the result data
-            // so use a simple display based on tool name and input
-            return ToolStatusDisplay.running(for: tool.name, input: tool.input).text
+    private var label: String {
+        if let path = tool.input["file_path"] ?? tool.input["path"] {
+            return URL(fileURLWithPath: path).lastPathComponent
         }
+        if let pattern = tool.input["pattern"] { return "grep: \(pattern)" }
+        if let cmd = tool.input["command"] {
+            let first = cmd.components(separatedBy: "\n").first ?? cmd
+            return String(first.prefix(50))
+        }
+        if let query = tool.input["query"] { return query }
+        if let url = tool.input["url"] { return String(url.prefix(40)) }
+        return tool.name
     }
 
     var body: some View {
         HStack(spacing: 4) {
-            // Status dot
             Circle()
                 .fill(statusColor.opacity(tool.status == .running ? dotOpacity : 0.6))
                 .frame(width: 4, height: 4)
-                .id(tool.status)  // Forces view recreation, cancelling repeatForever animation
+                .id(tool.status)
                 .onAppear {
                     if tool.status == .running {
                         withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) {
@@ -1377,18 +1392,13 @@ struct SubagentToolRow: View {
                     }
                 }
 
-            // Tool name
-            Text(tool.name)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.white.opacity(0.6))
-
-            // Status text (same format as regular tools)
-            Text(statusText)
-                .font(.system(size: 10))
-                .foregroundColor(.white.opacity(0.5))
+            Text(label)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(.white.opacity(0.55))
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
+        .padding(.vertical, 1)
     }
 }
 

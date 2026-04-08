@@ -33,7 +33,7 @@ struct NotchView: View {
     @State private var isBouncing: Bool = false
     @State private var isWiggling: Bool = false
     @State private var wiggleAngle: Double = 0
-    @State private var notificationSuppressedUntil: Date = Date()  // Suppress notifications during context resume
+    @State private var notificationSuppressedUntil: [String: Date] = [:]  // per-session suppression
 
     @Namespace private var activityNamespace
 
@@ -77,7 +77,7 @@ struct NotchView: View {
     private var closedNotchSize: CGSize {
         CGSize(
             width: viewModel.deviceNotchRect.width,
-            height: viewModel.deviceNotchRect.height + 2
+            height: viewModel.deviceNotchRect.height + (viewModel.hasPhysicalNotch ? 0.5 : 0)
         )
     }
 
@@ -511,14 +511,17 @@ struct NotchView: View {
             activityCoordinator.showActivity(type: .claude)
             isVisible = true
 
-            // When a session starts processing, set a suppression window.
-            // This prevents sound/bounce from firing if the session quickly
-            // transitions through processing → waitingForInput during context
-            // resume or session restoration.
+            // Per-session suppression: when a session enters processing, set a
+            // 2s window for THAT session only. This prevents false notifications
+            // during context resume / session restoration, without affecting
+            // other sessions' completion notifications.
             let suppressionDuration: TimeInterval = 2.0
-            let newSuppressedUntil = Date().addingTimeInterval(suppressionDuration)
-            if newSuppressedUntil > notificationSuppressedUntil {
-                notificationSuppressedUntil = newSuppressedUntil
+            let now = Date()
+            for session in sessionMonitor.instances where session.phase == .processing || session.phase == .compacting {
+                let id = session.stableId
+                if notificationSuppressedUntil[id] == nil || notificationSuppressedUntil[id]! < now {
+                    notificationSuppressedUntil[id] = now.addingTimeInterval(suppressionDuration)
+                }
             }
         } else if hasWaitingForInput {
             // Keep visible for waiting-for-input but hide the processing spinner
@@ -622,10 +625,14 @@ struct NotchView: View {
         let newPendingIds = currentIds.subtracting(previousPendingIds)
 
         if !newPendingIds.isEmpty {
-            // Play permission request sound (with suppression + focus check)
-            let isSuppressed = Date() < notificationSuppressedUntil
-            if !isSuppressed && soundSelector.hasSound(for: .permissionRequest) {
-                let newSessions = sessions.filter { newPendingIds.contains($0.stableId) }
+            // Play permission request sound (with per-session suppression + focus check)
+            let now = Date()
+            let unsuppressedIds = newPendingIds.filter { id in
+                guard let until = notificationSuppressedUntil[id] else { return true }
+                return now >= until
+            }
+            if !unsuppressedIds.isEmpty && soundSelector.hasSound(for: .permissionRequest) {
+                let newSessions = sessions.filter { unsuppressedIds.contains($0.stableId) }
                 Task {
                     let shouldPlay = await shouldPlayNotificationSound(for: newSessions)
                     if shouldPlay {
@@ -680,14 +687,23 @@ struct NotchView: View {
 
         // Bounce the notch when a session genuinely enters waitingForInput state
         if !genuinelyWaitingSessions.isEmpty {
-            // Suppress notifications during context resume window
-            let isSuppressed = now < notificationSuppressedUntil
+            // Filter out sessions still in their per-session suppression window
+            let unsuppressedSessions = genuinelyWaitingSessions.filter { session in
+                guard let suppressedUntil = notificationSuppressedUntil[session.stableId] else {
+                    return true  // no suppression for this session
+                }
+                return now >= suppressedUntil
+            }
+            // Clean up expired suppression entries
+            for session in genuinelyWaitingSessions {
+                notificationSuppressedUntil.removeValue(forKey: session.stableId)
+            }
 
-            if !isSuppressed {
+            if !unsuppressedSessions.isEmpty {
                 // Play task complete notification sound
                 if soundSelector.hasSound(for: .taskComplete) {
                     Task {
-                        let shouldPlaySound = await shouldPlayNotificationSound(for: genuinelyWaitingSessions)
+                        let shouldPlaySound = await shouldPlayNotificationSound(for: unsuppressedSessions)
                         if shouldPlaySound {
                             await MainActor.run {
                                 soundSelector.playSound(for: .taskComplete)
@@ -741,14 +757,16 @@ struct NotchView: View {
         let newQuestionIds = currentIds.subtracting(previousQuestionIds)
 
         if !newQuestionIds.isEmpty {
-            let isSuppressed = Date() < notificationSuppressedUntil
-            // Filter out sessions with active subagents
+            let now = Date()
+            // Filter out sessions with active subagents or in suppression window
             let genuineSessions = questionSessions.filter { session in
                 guard newQuestionIds.contains(session.stableId) else { return false }
-                return !session.subagentState.hasActiveSubagent
+                if session.subagentState.hasActiveSubagent { return false }
+                if let until = notificationSuppressedUntil[session.stableId], now < until { return false }
+                return true
             }
 
-            if !isSuppressed && !genuineSessions.isEmpty && soundSelector.hasSound(for: .questionWaiting) {
+            if !genuineSessions.isEmpty && soundSelector.hasSound(for: .questionWaiting) {
                 Task {
                     let shouldPlay = await shouldPlayNotificationSound(for: genuineSessions)
                     if shouldPlay {
@@ -770,10 +788,14 @@ struct NotchView: View {
         let newEndedIds = currentIds.subtracting(previousEndedIds)
 
         if !newEndedIds.isEmpty {
-            let isSuppressed = Date() < notificationSuppressedUntil
-            let newSessions = endedSessions.filter { newEndedIds.contains($0.stableId) }
+            let now = Date()
+            let newSessions = endedSessions.filter { session in
+                guard newEndedIds.contains(session.stableId) else { return false }
+                if let until = notificationSuppressedUntil[session.stableId], now < until { return false }
+                return true
+            }
 
-            if !isSuppressed && !newSessions.isEmpty && soundSelector.hasSound(for: .sessionEnded) {
+            if !newSessions.isEmpty && soundSelector.hasSound(for: .sessionEnded) {
                 Task {
                     let shouldPlay = await shouldPlayNotificationSound(for: newSessions)
                     if shouldPlay {

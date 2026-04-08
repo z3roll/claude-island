@@ -65,7 +65,7 @@ enum MainThreadWatchdog {
         info += "Use 'sample' or 'spindump' for the actual main-thread stack.\n"
 
         // Try to run `sample` to get the real main-thread stack
-        let pid = ProcessInfo.processInfo.processIdentifier
+        let pid = Foundation.ProcessInfo.processInfo.processIdentifier
         let sampleProcess = Process()
         let pipe = Pipe()
         sampleProcess.executableURL = URL(fileURLWithPath: "/usr/bin/sample")

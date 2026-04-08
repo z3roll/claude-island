@@ -225,7 +225,7 @@ extension HookEvent {
     /// Whether this event should trigger a file sync
     nonisolated var shouldSyncFile: Bool {
         switch event {
-        case "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop":
+        case "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SubagentStop":
             return true
         default:
             return false
