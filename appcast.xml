@@ -6,28 +6,21 @@
         <description>Claude Island Updates</description>
         <language>en</language>
         <item>
-            <title>Version 1.5.0</title>
-            <description><![CDATA[### Features
-- Add "+" button in notch header to create new tmux sessions running Claude Code.
-- Tmux sessions use claude-N naming with smallest available number.
-- Add trash button to kill individual tmux panes without affecting other sessions.
-- Show tmux session name badge in chat header.
-- Markdown links are now clickable — URLs open in browser, file paths open in Finder.
-- Working directory in chat header is clickable — opens folder in Finder and closes panel.
-- Bottom scroll fade gradient on instances list hints at more content below.
-
-### Fixes
-- ThinkingView now shows full text with auto-wrap instead of truncated ellipsis.
-- Fix list item text wrapping in MarkdownRenderer cutting off long lines.]]></description>
-            <pubDate>Thu, 09 Apr 2026 04:46:56 +0800</pubDate>
-            <sparkle:version>90</sparkle:version>
-            <sparkle:shortVersionString>1.5.0</sparkle:shortVersionString>
+            <title>Version 1.5.1</title>
+            <description><![CDATA[### Fixes
+- Terminal button now gives keyboard focus to the terminal immediately.
+- Terminal button switches to the correct tmux pane before focusing.
+- Notch panel closes and resigns key window when clicking terminal button.
+- Clear tmux input line thoroughly before sending to prevent duplicate messages after ESC interrupt.]]></description>
+            <pubDate>Thu, 09 Apr 2026 05:18:54 +0800</pubDate>
+            <sparkle:version>94</sparkle:version>
+            <sparkle:shortVersionString>1.5.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure
-                url="https://github.com/z3roll/claude-island/releases/download/v1.5.0/ClaudeIsland-v1.5.0.zip"
+                url="https://github.com/z3roll/claude-island/releases/download/v1.5.1/ClaudeIsland-v1.5.1.zip"
                 type="application/octet-stream"
-                sparkle:edSignature="pYpkzxajngi1bvRKvUlSS3yx7NTSDuQ6BJbcdCyxGr2b93mqhqmpJyZl+oWOZvTzmq1BqHMdOB//7FOZK5NXAw=="
-                length="4046558"
+                sparkle:edSignature="oXtdwSiIbdUWUgTslAqaKCO8ImGVhqTtf79Zpy1F49vEzRXK7C8x/kKJDSsxrQrYBKYzwusL3zII2/3dFZokCw=="
+                length="4047818"
             />
         </item>
     </channel>
